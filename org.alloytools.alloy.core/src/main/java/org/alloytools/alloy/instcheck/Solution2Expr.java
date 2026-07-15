@@ -53,6 +53,50 @@ public class Solution2Expr {
 				throw new RuntimeException("Signature " + s + " for atom type is not PrimSig (TODO).");
 			}
 		}
+		if (sol.isTemporal() && sol.getTraceLength() > 0) {
+			Expr traceExpr = union(sigs).equal(union(atomSigs.values()));
+			for (int k = 0; k < sol.getTraceLength(); k++) {
+				Expr stateExpr = ExprConstant.TRUE;
+				for (Sig s : sigs) {
+					Expr sVal = null;
+					for (edu.mit.csail.sdg.translator.A4Tuple tup : sol.eval(s, k)) {
+						Sig aSig = atomSigs.get(tup.atom(0));
+						if (aSig == null) aSig = enumSig(sigs, tup.atom(0));
+						if (aSig != null) {
+							sVal = (sVal == null) ? aSig : sVal.plus(aSig);
+						}
+					}
+					if (sVal == null) sVal = ExprConstant.EMPTYNESS;
+					stateExpr = stateExpr.and(s.equal(sVal));
+
+					for (Field f : s.getFields()) {
+						Expr fVal = null;
+						for (edu.mit.csail.sdg.translator.A4Tuple tup : sol.eval(f, k)) {
+							Expr tupExpr = null;
+							for (int i = 0; i < tup.arity(); i++) {
+								Sig aSig = atomSigs.get(tup.atom(i));
+								if (aSig == null) aSig = enumSig(sigs, tup.atom(i));
+								if (aSig != null) {
+									tupExpr = (tupExpr == null) ? aSig : tupExpr.product(aSig);
+								}
+							}
+							if (tupExpr != null) {
+								fVal = (fVal == null) ? tupExpr : fVal.plus(tupExpr);
+							}
+						}
+						if (fVal == null) fVal = ExprConstant.EMPTYNESS;
+						stateExpr = stateExpr.and(f.equal(fVal));
+					}
+				}
+				Expr stepExpr = stateExpr;
+				for (int i = 0; i < k; i++) {
+					stepExpr = edu.mit.csail.sdg.ast.ExprUnary.Op.AFTER.make(null, stepExpr);
+				}
+				traceExpr = traceExpr.and(stepExpr);
+			}
+			return traceExpr;
+		}
+
 		e = e.and(union(sigs).equal(union(atomSigs.values())));
 
 		setUpTupleLists(sigs);

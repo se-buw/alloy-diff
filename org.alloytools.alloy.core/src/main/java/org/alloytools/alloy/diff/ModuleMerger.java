@@ -10,6 +10,7 @@ import java.util.Set;
 import java.util.Stack;
 
 import edu.mit.csail.sdg.alloy4.ConstList;
+import edu.mit.csail.sdg.alloy4.Pos;
 import edu.mit.csail.sdg.ast.Attr;
 import edu.mit.csail.sdg.ast.Decl;
 import edu.mit.csail.sdg.ast.Expr;
@@ -120,15 +121,9 @@ public class ModuleMerger {
 		// fill look-up tables
 		for (Sig s : v1.getAllReachableUserDefinedSigs()) {
 			v1Sigs.put(s.toString(), s);
-			if (s.label.endsWith("/Ord")) {
-				throw new RuntimeException("Ordering not supported.");
-			}
 		}
 		for (Sig s : v2.getAllReachableUserDefinedSigs()) {
 			v2Sigs.put(s.toString(), s);
-			if (s.label.endsWith("/Ord")) {
-				throw new RuntimeException("Ordering not supported.");
-			}
 		}
 
 		// do merge of signatures
@@ -150,16 +145,11 @@ public class ModuleMerger {
 				if (old instanceof PrimSig) {
 					// check if needed: abstract sigs with children are not needed
 					if (old.isAbstract == null || v1iu.getSubSigs(old) == null) {
-						Sig s = null;
-						if (old.isLone != null || old.isOne != null) {
-							s = new PrimSig(sName, Attr.LONE);
-						} else {
-							s = new PrimSig(sName);
-						}
+						Sig s = new PrimSig(sName, getCopySigAttributes(old));
 						sigs.put(sName, s);
 						c1 = generateSigAttributeConstraints(s, old, v1iu, c1);
 						// closed world
-						c2 = c2.and(s.no());
+						c2 = c2.and(alwaysIfVar(s.no(), old.isVariable != null));
 					}
 				}
 			}
@@ -170,16 +160,11 @@ public class ModuleMerger {
 				// adding signatures that are unique in v2
 				if (old instanceof PrimSig) {
 					if (old.isAbstract == null || v2iu.getSubSigs(old) == null) {
-						Sig s = null;
-						if (old.isLone != null || old.isOne != null) {
-							s = new PrimSig(sName, Attr.LONE);
-						} else {
-							s = new PrimSig(sName);
-						}
+						Sig s = new PrimSig(sName, getCopySigAttributes(old));
 						sigs.put(sName, s);
 						c2 = generateSigAttributeConstraints(s, old, v2iu, c2);
 						// closed world
-						c1 = c1.and(s.no());
+						c1 = c1.and(alwaysIfVar(s.no(), old.isVariable != null));
 					}
 				}
 			}
@@ -438,7 +423,13 @@ public class ModuleMerger {
 	private Sig mergeSig(Sig s1, Sig s2) {
 		Sig s = new PrimSig(s1.label, getCommonSigAttributes(s1, s2));
 		c1 = generateSigAttributeConstraints(s, s1, v1iu, c1);
+		if (s1.isVariable == null && s.isVariable != null) {
+			c1 = c1.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, s.prime(), s)));
+		}
 		c2 = generateSigAttributeConstraints(s, s2, v2iu, c2);
+		if (s2.isVariable == null && s.isVariable != null) {
+			c2 = c2.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, s.prime(), s)));
+		}
 
 		return s;
 	}
@@ -496,6 +487,7 @@ public class ModuleMerger {
 		names.add(mergedSig.decl);
 
 		if (f1 != null && f2 != null) { // field is in both versions
+			Pos isVar = (f1.isVariable != null ? f1.isVariable : f2.isVariable);
 			if (f1.decl().expr instanceof ExprUnary && f2.decl().expr instanceof ExprUnary) { // unary fields
 				ExprUnary e1 = (ExprUnary) replaceSigRefs(f1.decl().expr, names, true);
 				ExprUnary e2 = (ExprUnary) replaceSigRefs(f2.decl().expr, names, false);
@@ -506,7 +498,7 @@ public class ModuleMerger {
 				if (v1iu.getFieldsFromSubsetSig().contains(f1) || v2iu.getFieldsFromSubsetSig().contains(f2)) {
 					op = getMergeOp(op, ExprUnary.Op.NO);
 				}
-				f = mergedSig.addField(f1.label, op.make(f1.pos, union));
+				f = mergedSig.addField(f1.label, op.make(f1.pos, union), isVar);
 
 				Decl ths = mergedSig.decl;
 				Expr quantBody1 = ths.get().join(f).in(e1);
@@ -522,18 +514,24 @@ public class ModuleMerger {
 				Expr e1mult = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), quantBody1);
 				Expr e2mult = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), quantBody2);
 
-				c1 = c1.and(e1mult);
-				c2 = c2.and(e2mult);
+				c1 = c1.and(alwaysIfVar(e1mult, f1.isVariable != null));
+				if (f1.isVariable == null && f.isVariable != null) {
+					c1 = c1.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f))));
+				}
+				c2 = c2.and(alwaysIfVar(e2mult, f2.isVariable != null));
+				if (f2.isVariable == null && f.isVariable != null) {
+					c2 = c2.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f))));
+				}
 			} else if (f1.decl().expr instanceof ExprBinary && f2.decl().expr instanceof ExprBinary) { // relational
 																										// fields
 				Expr e1 = replaceSigRefs(f1.decl().expr, names, true);
 				Expr e2 = replaceSigRefs(f2.decl().expr, names, false);
 				Field f;
 				if (e1.isSame(e2)) {
-					f = mergedSig.addField(f1.label, e1);
+					f = mergedSig.addField(f1.label, e1, isVar);
 				} else {
 					Expr union = replaceArrows(e1).plus(replaceArrows(e2));
-					f = mergedSig.addField(f1.label, union);
+					f = mergedSig.addField(f1.label, union, isVar);
 
 					Decl ths = mergedSig.decl;
 					Expr quantBody1 = ths.get().join(f).in(e1);
@@ -549,8 +547,14 @@ public class ModuleMerger {
 					Expr e1mult = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), quantBody1);
 					Expr e2mult = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), quantBody2);
 
-					c1 = c1.and(e1mult);
-					c2 = c2.and(e2mult);
+					c1 = c1.and(alwaysIfVar(e1mult, f1.isVariable != null));
+					if (f1.isVariable == null && f.isVariable != null) {
+						c1 = c1.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f))));
+					}
+					c2 = c2.and(alwaysIfVar(e2mult, f2.isVariable != null));
+					if (f2.isVariable == null && f.isVariable != null) {
+						c2 = c2.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f))));
+					}
 				}
 			} else {
 				throw new RuntimeException("Mix of field arities " + f1.pos);
@@ -593,43 +597,43 @@ public class ModuleMerger {
 								ExprUnary.Op op = getMergeOp(((ExprUnary) bound).op, Op.NO);
 								bound = op.make(f.pos, ((ExprUnary) bound).sub);
 								// case 1: add the now optional field 
-								Field merged = s.addField(f.label, bound);		
+								Field merged = s.addField(f.label, bound, f.isVariable);		
 								if (inV1) {
 									Decl ths = s.decl;
 									Expr quantBody1 = ths.get().join(merged).in(origBound);
 									quantBody1 = ExprITE.make(f.pos, ths.get().in(sigs.get(f.sig.label)),
 											quantBody1, ths.get().join(merged).no());
 									Expr e1mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody1);
-									c1 = c1.and(e1mult);
+									c1 = c1.and(alwaysIfVar(e1mult, f.isVariable != null));
 								} else {
 									Decl ths = s.decl;
 									Expr quantBody2 = ths.get().join(merged).in(origBound);
 									quantBody2 = ExprITE.make(f.pos, ths.get().in(sigs.get(f.sig.label)),
 											quantBody2, ths.get().join(merged).no());
 									Expr e2mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody2);
-									c2 = c2.and(e2mult);
+									c2 = c2.and(alwaysIfVar(e2mult, f.isVariable != null));
 								}
 							} else {
 								// case 2: add relational field as is (it cannot have a multiplicity) 
-								Field merged = s.addField(f.label, bound);
+								Field merged = s.addField(f.label, bound, f.isVariable);
 								// field needs to be suppressed
 								if (inV1) {
 									Decl ths = s.decl;
 									Expr quantBody1 = ths.get().in(sigs.get(f.sig.label))
 											.or(ths.get().join(merged).no());
 									Expr e1mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody1);
-									c1 = c1.and(e1mult);
+									c1 = c1.and(alwaysIfVar(e1mult, f.isVariable != null));
 								} else {
 									Decl ths = s.decl;
 									Expr quantBody2 = ths.get().in(sigs.get(f.sig.label))
 											.or(ths.get().join(merged).no());
 									Expr e2mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody2);
-									c2 = c2.and(e2mult);
+									c2 = c2.and(alwaysIfVar(e2mult, f.isVariable != null));
 								}
 							}
 						} else {
 							// case 3: just add field as is
-							s.addField(f.label, bound);
+							s.addField(f.label, bound, f.isVariable);
 						}
 						sigOverrideForField = null;
 						fieldsToAdd.pop();
@@ -665,7 +669,7 @@ public class ModuleMerger {
 		Expr e = replaceSigRefs(field.decl().expr, names, inC1);
 		if (e instanceof ExprUnary) {
 			ExprUnary.Op op = getMergeOp(((ExprUnary) e).op, ExprUnary.Op.NO);
-			f = mergedSig.addField(field.label, op.make(field.pos, ((ExprUnary) e).sub));
+			f = mergedSig.addField(field.label, op.make(field.pos, ((ExprUnary) e).sub), field.isVariable);
 			Decl ths = mergedSig.decl;
 			if (inC1) {
 				Expr quantBody = ths.get().join(f).in(e);
@@ -675,11 +679,11 @@ public class ModuleMerger {
 							ths.get().join(f).no());
 				}
 				Expr e1mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-				c1 = c1.and(e1mult);
+				c1 = c1.and(alwaysIfVar(e1mult, field.isVariable != null));
 
-				c2 = c2.and(f.decl().get().no());
+				c2 = c2.and(alwaysIfVar(f.decl().get().no(), field.isVariable != null));
 			} else {
-				c1 = c1.and(f.decl().get().no());
+				c1 = c1.and(alwaysIfVar(f.decl().get().no(), field.isVariable != null));
 
 				Expr quantBody = ths.get().join(f).in(e);
 				// restriction of fields from SubsetSigs
@@ -689,29 +693,29 @@ public class ModuleMerger {
 				}
 
 				Expr e2mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-				c2 = c2.and(e2mult);
+				c2 = c2.and(alwaysIfVar(e2mult, field.isVariable != null));
 			}
 		} else if (e instanceof ExprBinary) {
-			f = mergedSig.addField(field.label, e);
+			f = mergedSig.addField(field.label, e, field.isVariable);
 			if (inC1) {
 				if (v1iu.getFieldsFromSubsetSig().contains(field)) {
 					Decl ths = mergedSig.decl;
 					// make empty if not in SubsetSig
 					Expr quantBody = ths.get().in(sigs.get(field.sig.label)).or(ths.get().join(f).no());
 					Expr e1mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-					c1 = c1.and(e1mult);
+					c1 = c1.and(alwaysIfVar(e1mult, field.isVariable != null));
 				}
-				c2 = c2.and(f.decl().get().no());
+				c2 = c2.and(alwaysIfVar(f.decl().get().no(), field.isVariable != null));
 			} else {
 				if (v2iu.getFieldsFromSubsetSig().contains(field)) {
 					Decl ths = mergedSig.decl;
 					// make empty if not in SubsetSig
 					Expr quantBody = ths.get().in(sigs.get(field.sig.label)).or(ths.get().join(f).no());
 					Expr e2mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-					c2 = c2.and(e2mult);
+					c2 = c2.and(alwaysIfVar(e2mult, field.isVariable != null));
 				}
 
-				c1 = c1.and(f.decl().get().no());
+				c1 = c1.and(alwaysIfVar(f.decl().get().no(), field.isVariable != null));
 			}
 		}
 	}
@@ -1079,25 +1083,46 @@ public class ModuleMerger {
 	 * @param c
 	 * @return
 	 */
-	private Expr generateSigAttributeConstraints(Sig s, Sig old, InheritanceUtil iu, Expr c) {
+	private Expr alwaysIfVar(Expr e, boolean isVar) {
+		if (isVar) {
+			return ExprUnary.Op.ALWAYS.make(null, e);
+		}
+		return e;
+	}
 
+	private Attr[] getCopySigAttributes(Sig old) {
+		List<Attr> attrs = new ArrayList<>();
+		for (Attr a : old.attributes) {
+			if (a != null) {
+				if (a.type == Attr.AttrType.ONE) {
+					attrs.add(Attr.AttrType.LONE.make(a.pos));
+				} else {
+					attrs.add(a.type.make(a.pos));
+				}
+			}
+		}
+		return attrs.toArray(new Attr[] {});
+	}
+
+	private Expr generateSigAttributeConstraints(Sig s, Sig old, InheritanceUtil iu, Expr c) {
+		boolean isVar = (old.isVariable != null);
 		if (old.isAbstract != null && s.isAbstract == null) {
 			// without inheritance, abstract has no impact
 			if (iu.getSubSigs(old) != null) {
-				c = c.and(s.no());
+				c = c.and(alwaysIfVar(s.no(), isVar));
 			}
 		}
 
 		if (old.isLone != null && s.isLone == null) {
-			c = c.and(s.lone());
+			c = c.and(alwaysIfVar(s.lone(), isVar));
 		}
 
 		if (old.isOne != null && s.isOne == null) {
-			c = c.and(s.one());
+			c = c.and(alwaysIfVar(s.one(), isVar));
 		}
 
 		if (old.isSome != null && s.isSome == null) {
-			c = c.and(s.some());
+			c = c.and(alwaysIfVar(s.some(), isVar));
 		}
 
 		return c;
@@ -1120,7 +1145,19 @@ public class ModuleMerger {
 				}
 			}
 		}
+		if ((s1.isVariable != null || s2.isVariable != null) && !containsVariable(attrs)) {
+			attrs.add(Attr.AttrType.VARIABLE.make(null));
+		}
 		return attrs.toArray(new Attr[] {});
+	}
+
+	private boolean containsVariable(List<Attr> attrs) {
+		for (Attr a : attrs) {
+			if (a != null && a.type == Attr.AttrType.VARIABLE) {
+				return true;
+			}
+		}
+		return false;
 	}
 
 }

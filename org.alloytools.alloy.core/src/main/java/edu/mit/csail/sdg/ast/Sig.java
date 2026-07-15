@@ -898,6 +898,10 @@ public abstract class Sig extends Expr implements Clause {
      *             set/relation
      */
     public final Field addField(String label, Expr bound) throws Err {
+        return addField(label, bound, null);
+    }
+
+    public final Field addField(String label, Expr bound, Pos isVar) throws Err {
         bound = bound.typecheck_as_set();
         if (bound.ambiguous)
             bound = bound.resolve_as_set(null);
@@ -906,13 +910,14 @@ public abstract class Sig extends Expr implements Clause {
                                                          // multiplicity
                                                          // symbol, we assume
                                                          // it's oneOf
-        final Field f = new Field(null, null, null, null, null, null, this, null, label, bound);
-        final Decl d = new Decl(null, null, null, null, Arrays.asList(f), bound);
+        final Field f = new Field(null, null, null, null, null, isVar, this, null, label, bound);
+        final Decl d = new Decl(null, null, null, isVar, Arrays.asList(f), bound);
         f.decl = d;
         fields.add(d);
         realFields.add(f);
         return f;
     }
+
 
     /**
      * Add then return a new field, where "all x: ThisSig | x.F in bound"

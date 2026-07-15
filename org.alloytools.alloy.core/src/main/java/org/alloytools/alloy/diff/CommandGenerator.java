@@ -54,7 +54,12 @@ public class CommandGenerator {
 			scope = 3;
 		}
 
-		Command cmd4scope = new Command(false, scope, -1, -1, ExprConstant.TRUE);
+		int maxseq = Math.max(cmd1.maxseq, cmd2.maxseq);
+		int minprefix = Math.max(cmd1.minprefix, cmd2.minprefix);
+		int maxprefix = Math.max(cmd1.maxprefix, cmd2.maxprefix);
+		edu.mit.csail.sdg.ast.ExprVar commandKeyword = (cmd1.commandKeyword != null ? cmd1.commandKeyword : cmd2.commandKeyword);
+
+		Command cmd4scope = new Command(edu.mit.csail.sdg.alloy4.Pos.UNKNOWN, ExprConstant.TRUE, "", false, scope, -1, maxseq, minprefix, maxprefix, -1, null, null, commandKeyword, ExprConstant.TRUE, null);
 		MyScopeComputer sc1 = MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v1Sigs.values(), cmd4scope);
 		MyScopeComputer sc1orig = MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v1Sigs.values(), cmd1);
 		MyScopeComputer sc2 = MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v2Sigs.values(), cmd4scope);
@@ -141,7 +146,7 @@ public class CommandGenerator {
 			bitwidth++;
 		}
 
-		Command cmd = new Command(false, scope, bitwidth, -1, getExpr(c1, c2, a));
+		Command cmd = new Command(edu.mit.csail.sdg.alloy4.Pos.UNKNOWN, getExpr(c1, c2, a), "", false, scope, bitwidth, maxseq, minprefix, maxprefix, -1, null, null, commandKeyword, getExpr(c1, c2, a), null);
 
 		boolean changed = false;
 		// update scope based on both modules
