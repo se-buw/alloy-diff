@@ -212,6 +212,10 @@ public final class Command extends Browsable {
         this(null, null, "", check, overall, bitwidth, maxseq, -1, -1, -1, null, null, commandKeyword, formula, null);
     }
 
+    public Command(boolean check, int overall, int bitwidth, int maxseq, Expr formula) throws ErrorSyntax {
+        this(check, overall, bitwidth, maxseq, null, formula);
+    }
+
     /**
      * Constructs a new Command object.
      *

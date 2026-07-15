@@ -401,6 +401,11 @@ public final class OurTabbedSyntaxWidget {
         return (me >= 0 && me < tabs.size()) ? tabs.get(me) : new OurSyntaxWidget(this, syntaxHighlighting, "", fontName, fontSize, tabSize, lineNumbers, null, null);
     }
 
+    /** Returns a copy of the list of all open text buffers. */
+    public List<OurSyntaxWidget> getTabs() {
+        return new ArrayList<OurSyntaxWidget>(tabs);
+    }
+
     /**
      * True if the i-th text buffer has been modified since it was last loaded/saved
      */

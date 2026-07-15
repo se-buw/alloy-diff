@@ -143,6 +143,10 @@ public final class Func extends Expr implements Clause {
         this(pos, null, labelPos, label, decls, returnDecl, body);
     }
 
+    public Func(Pos pos, String label, List<Decl> decls, Expr returnDecl, Expr body) throws Err {
+        this(pos, null, label, decls, returnDecl, body);
+    }
+
     /**
      * Constructs a new predicate/function.
      * <p>

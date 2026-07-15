@@ -92,6 +92,13 @@ public final class Decl {
         this.expr = expr;
     }
 
+    /**
+     * This constructs a declaration without isVar (for backward compatibility).
+     */
+    public Decl(Pos isPrivate, Pos disjoint, Pos disjoint2, List< ? extends ExprHasName> names, Expr expr) {
+        this(isPrivate, disjoint, disjoint2, null, names, expr);
+    }
+
     /** Return the first variable in this declaration. */
     public ExprHasName get() {
         return names.get(0);

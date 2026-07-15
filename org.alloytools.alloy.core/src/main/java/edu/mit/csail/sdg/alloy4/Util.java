@@ -619,6 +619,7 @@ public final class Util {
      * @param str - the String to write out
      */
     public static void encodeXML(PrintWriter out, String str) {
+        if (str == null) return;
         int n = str.length();
         for (int i = 0; i < n; i++) {
             char c = str.charAt(i);
@@ -669,6 +670,7 @@ public final class Util {
      * @param str - the String to write out
      */
     public static void encodeXML(StringBuilder out, String str) {
+        if (str == null) return;
         int n = str.length();
         for (int i = 0; i < n; i++) {
             char c = str.charAt(i);
@@ -740,9 +742,9 @@ public final class Util {
      */
     public static void encodeXMLs(PrintWriter out, String... strs) {
         for (int i = 0; i < strs.length; i++) {
-            if ((i % 2) == 0)
-                out.print(strs[i]);
-            else
+            if ((i % 2) == 0) {
+                if (strs[i] != null) out.print(strs[i]);
+            } else
                 encodeXML(out, strs[i]);
         }
     }
@@ -766,9 +768,9 @@ public final class Util {
      */
     public static void encodeXMLs(StringBuilder out, String... strs) {
         for (int i = 0; i < strs.length; i++) {
-            if ((i % 2) == 0)
-                out.append(strs[i]);
-            else
+            if ((i % 2) == 0) {
+                if (strs[i] != null) out.append(strs[i]);
+            } else
                 encodeXML(out, strs[i]);
         }
     }

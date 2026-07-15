@@ -129,6 +129,10 @@ public class A4Reporter {
             parent.translate(solver, bitwidth, maxseq, mintrace, maxtrace, skolemDepth, symmetry, strat);
     }
 
+    public void translate(String solver, int bitwidth, int maxseq, int skolemDepth, int symmetry) {
+        translate(solver, bitwidth, maxseq, -1, -1, skolemDepth, symmetry, "");
+    }
+
     /**
      * This method is called by the translator just after it generated the CNF.
      *
@@ -141,6 +145,10 @@ public class A4Reporter {
     public void solve(int plength, int primaryVars, int totalVars, int clauses) {
         if (parent != null)
             parent.solve(plength, primaryVars, totalVars, clauses);
+    }
+
+    public void solve(int primaryVars, int totalVars, int clauses) {
+        solve(-1, primaryVars, totalVars, clauses);
     }
 
     /**

@@ -72,6 +72,9 @@ import java.io.FileInputStream;
 import java.io.IOException;
 import java.io.InputStream;
 import java.io.ObjectInputStream;
+import java.nio.file.Files;
+import java.nio.file.Path;
+import java.nio.file.Paths;
 import java.lang.reflect.Method;
 import java.net.URI;
 import java.net.URISyntaxException;
@@ -344,6 +347,7 @@ public final class SimpleGUI implements ComponentListener, Listener {
 
     /** The preferences dialog. */
     private PreferencesDialog     prefDialog;
+    private CompareFilesDialog    compareDialog;
 
     // ====== helper methods =================================================//
 
@@ -832,6 +836,36 @@ public final class SimpleGUI implements ComponentListener, Listener {
         return wrapMe();
     }
 
+    /** This method performs Comparison of two Alloy model specs. */
+    private Runner doCompare() {
+        if (!wrap) {
+            final String binary = alloyHome(frame) + fs + "binary";
+
+            List<OurSyntaxWidget> tabsList = new ArrayList<OurSyntaxWidget>();
+
+            for (OurSyntaxWidget tab : text.getTabs()) {
+                Path filePath = Paths.get(tab.getFilename());
+                if (Files.exists(filePath)) {
+                    tabsList.add(tab);
+                }
+            }
+
+            if (tabsList.size() < 2) {
+                log.logRed("Please open at least two files in the Alloy Analyzer. \nMake sure you've saved the files!\n");
+            } else {
+                compareDialog = new CompareFilesDialog(log, binary, tabsList, text.get().getFilename());
+                compareDialog.setDefaultCloseOperation(WindowConstants.DISPOSE_ON_CLOSE);
+                try {
+                    wrap = true;
+                } finally {
+                    wrap = false;
+                }
+                compareDialog.setVisible(true);
+            }
+        }
+        return wrapMe();
+    }
+
     // ===============================================================================================================//
 
     /** This method refreshes the "edit" menu. */
@@ -1017,6 +1051,7 @@ public final class SimpleGUI implements ComponentListener, Listener {
             menuItem(runmenu, "Show Metamodel", 'M', 'M', doShowMetaModel());
             if (Version.experimental)
                 menuItem(runmenu, "Show Parse Tree", 'P', doShowParseTree());
+            menuItem(runmenu, "Compare Models...", 'C', doCompare());
         } finally {
             wrap = false;
         }
@@ -2134,6 +2169,7 @@ public final class SimpleGUI implements ComponentListener, Listener {
             toolbar.add(stopbutton = OurUtil.button("Stop", "Stops the current analysis", "images/24_execute_abort2.gif", doStop(2)));
             stopbutton.setVisible(false);
             toolbar.add(showbutton = OurUtil.button("Show", "Shows the latest instance", "images/24_graph.gif", doShowLatest()));
+            toolbar.add(OurUtil.button("Compare", "Compares Alloy models", "images/24_graph.gif", doCompare()));
             toolbar.add(Box.createHorizontalGlue());
             toolbar.setBorder(new OurBorder(false, false, false, false));
         } finally {
@@ -2149,6 +2185,7 @@ public final class SimpleGUI implements ComponentListener, Listener {
 
         // Create loggers for preference changes
         PreferencesDialog.logOnChange(log, A4Preferences.allUserPrefs().toArray(new Pref< ? >[0]));
+        CompareFilesDialog.logOnChange(log, A4Preferences.allUserPrefs().toArray(new Pref< ? >[0]));
 
         // Create the text area
         text = new OurTabbedSyntaxWidget(fontName, fontSize, TabSize.get(), LineNumbers.get(), frame);

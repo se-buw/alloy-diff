@@ -1,5 +1,6 @@
 .DS_Store
 .gradle/
+alloy-diff/
 generated/
 bin/
 bin_test/

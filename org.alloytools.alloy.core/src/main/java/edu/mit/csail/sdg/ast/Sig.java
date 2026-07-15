@@ -565,6 +565,10 @@ public abstract class Sig extends Expr implements Clause {
             this(null, label, null, null, attributes);
         }
 
+        public PrimSig(String label, PrimSig parent, Attr... attributes) throws Err {
+            this(null, label, null, parent, attributes);
+        }
+
         /** {@inheritDoc} */
         @Override
         public boolean isSameOrDescendentOf(Sig that) {
@@ -679,6 +683,10 @@ public abstract class Sig extends Expr implements Clause {
          * @throws ErrorSyntax if the signature has two or more multiplicities
          * @throws ErrorType if parents only contains NONE
          */
+        public SubsetSig(String label, Collection<Sig> parents, Attr... attributes) throws Err {
+            this(null, label, null, parents, attributes);
+        }
+
         public SubsetSig(Pos labelPos, String label, Collection<Pos> parentRefPoss, Collection<Sig> parents, Attr... attributes) throws Err {
             super(getType(label, parents), labelPos, label, Util.append(attributes, Attr.SUBSET));
             if (isEnum != null)
