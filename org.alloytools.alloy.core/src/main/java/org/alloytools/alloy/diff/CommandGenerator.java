@@ -94,7 +94,7 @@ public class CommandGenerator {
 				}
 
 				int scopeInOrig = Math.min(sc1.sig2scope(parent), sc1orig.sig2scope(parent));
-				if (sc1.isExact(parent) || cmd1.additionalExactScopes.contains(parent)) {
+				if (sc1orig.isExact(parent) || cmd1.additionalExactScopes.contains(parent)) {
 					c1 = c1.and(union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
 				} else {
 					c1 = c1.and(union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
@@ -127,7 +127,7 @@ public class CommandGenerator {
 				}
 
 				int scopeInOrig = Math.min(sc2.sig2scope(parent), sc2orig.sig2scope(parent));
-				if (sc2.isExact(parent) || cmd2.additionalExactScopes.contains(parent)) {
+				if (sc2orig.isExact(parent) || cmd2.additionalExactScopes.contains(parent)) {
 					c2 = c2.and(union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
 				} else {
 					c2 = c2.and(union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
@@ -158,7 +158,7 @@ public class CommandGenerator {
 			boolean exact1 = cmd1.additionalExactScopes.contains(s1);
 			if (s1 != null) {
 				scope1 = Math.min(sc1.sig2scope(s1), sc1orig.sig2scope(s1));
-				exact1 |= sc1.isExact(s1);
+				exact1 |= sc1orig.isExact(s1);
 			}
 
 			Sig s2 = m.v2Sigs.get(sName);
@@ -166,7 +166,7 @@ public class CommandGenerator {
 			boolean exact2 = cmd2.additionalExactScopes.contains(s2);
 			if (s2 != null) {
 				scope2 = Math.min(sc2.sig2scope(s2), sc2orig.sig2scope(s2));
-				exact2 |= sc2.isExact(s2);
+				exact2 |= sc2orig.isExact(s2);
 			}
 
 			if (Math.max(scope1, scope2) >= 1) {
@@ -205,6 +205,11 @@ public class CommandGenerator {
 			break;
 		}
 		return ExprConstant.TRUE;
+	}
+
+	public Command generateCommand(Module v1, Module v2, int scope, boolean withPred, Expr customFormula) {
+		Command baseCmd = generateDiffCommand(v1, v2, scope, withPred, Analysis.CommonInst);
+		return baseCmd.change(customFormula);
 	}
 
 }

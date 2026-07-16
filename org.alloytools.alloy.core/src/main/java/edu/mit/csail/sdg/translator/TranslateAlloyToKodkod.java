@@ -19,6 +19,8 @@ import static edu.mit.csail.sdg.alloy4.Util.tail;
 import static edu.mit.csail.sdg.ast.Sig.UNIV;
 
 import java.util.ArrayList;
+import java.util.Arrays;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.IdentityHashMap;
 import java.util.List;
@@ -248,6 +250,7 @@ public final class TranslateAlloyToKodkod extends VisitReturn<Object> {
      * Stores the list of "totalOrder predicates" that we constructed.
      */
     private final List<Relation> totalOrderPredicates = new ArrayList<Relation>();
+    private final Map<List<Relation>, Relation> totalOrderLastMap = new HashMap<List<Relation>, Relation>();
 
     /**
      * Conjoin the constraints for "field declarations" and "fact" paragraphs
@@ -363,7 +366,7 @@ public final class TranslateAlloyToKodkod extends VisitReturn<Object> {
             for (Sig s : allSigs) {
                 // The case below is STRICTLY an optimization; the entire
                 // statement can be removed without affecting correctness
-                if (s.isOne != null && s.getFields().size() == 2)
+                /* if (s.isOne != null && s.getFields().size() == 2)
                     for (int i = 0; i + 3 < totalOrderPredicates.size(); i = i + 4)
                         if (totalOrderPredicates.get(i + 1) == right(sol.a2k(s.getFields().get(0))) && totalOrderPredicates.get(i + 3) == right(sol.a2k(s.getFields().get(1)))) {
                             TupleSet allelem = sol.query(true, totalOrderPredicates.get(i), true);
@@ -385,7 +388,7 @@ public final class TranslateAlloyToKodkod extends VisitReturn<Object> {
                             } catch (Throwable ex) {
                                 // Error here is not fatal
                             }
-                        }
+                        } */
                 // The case above is STRICTLY an optimization; the entire
                 // statement can be removed without affecting correctness
                 for (Field f : s.getFields()) {
@@ -1069,12 +1072,18 @@ public final class TranslateAlloyToKodkod extends VisitReturn<Object> {
         if (x.op == ExprList.Op.TOTALORDER) {
             Expression elem = cset(x.args.get(0)), first = cset(x.args.get(1)), next = cset(x.args.get(2));
             if (elem instanceof Relation && first instanceof Relation && next instanceof Relation) {
-                Relation lst = frame.addRel(((Relation) elem).name() + "_last", null, frame.query(true, elem, false), false); // [electrum] no unnamed rels for electrod
-                totalOrderPredicates.add((Relation) elem);
-                totalOrderPredicates.add((Relation) first);
-                totalOrderPredicates.add(lst);
-                totalOrderPredicates.add((Relation) next);
-                return k2pos(((Relation) next).totalOrder((Relation) elem, (Relation) first, lst), x);
+                List<Relation> key = Arrays.asList((Relation) elem, (Relation) first, (Relation) next);
+                Relation lst = totalOrderLastMap.get(key);
+                if (lst == null) {
+                    lst = frame.addRel(((Relation) elem).name() + "_last", null, frame.query(true, elem, false), false); // [electrum] no unnamed rels for electrod
+                    totalOrderPredicates.add((Relation) elem);
+                    totalOrderPredicates.add((Relation) first);
+                    totalOrderPredicates.add(lst);
+                    totalOrderPredicates.add((Relation) next);
+                    totalOrderLastMap.put(key, lst);
+                }
+                Formula f = ((Relation) next).totalOrder((Relation) elem, (Relation) first, lst).and(lst.eq(((Relation) elem).difference(((Relation) next).join((Relation) elem))));
+                return k2pos(f, x);
             }
             Formula f1 = elem.in(first.join(next.reflexiveClosure())); // every
                                                                       // element
