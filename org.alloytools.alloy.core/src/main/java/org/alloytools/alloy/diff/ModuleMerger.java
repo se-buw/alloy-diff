@@ -121,9 +121,15 @@ public class ModuleMerger {
 		// fill look-up tables
 		for (Sig s : v1.getAllReachableUserDefinedSigs()) {
 			v1Sigs.put(s.toString(), s);
+			if (s.label.endsWith("/Ord")) {
+				throw new RuntimeException("Ordering not supported.");
+			}
 		}
 		for (Sig s : v2.getAllReachableUserDefinedSigs()) {
 			v2Sigs.put(s.toString(), s);
+			if (s.label.endsWith("/Ord")) {
+				throw new RuntimeException("Ordering not supported.");
+			}
 		}
 
 		// do merge of signatures
