@@ -1,12 +1,16 @@
 package org.alloytools.alloy.diff;
 
 import java.util.Collection;
+import java.util.LinkedHashMap;
+import java.util.Map;
 
 import edu.mit.csail.sdg.alloy4.A4Reporter;
 import edu.mit.csail.sdg.alloy4.ErrorWarning;
+import edu.mit.csail.sdg.alloy4.Util;
 import edu.mit.csail.sdg.ast.Command;
 import edu.mit.csail.sdg.ast.Module;
 import edu.mit.csail.sdg.ast.Sig;
+import edu.mit.csail.sdg.parser.CompModule;
 import edu.mit.csail.sdg.parser.CompUtil;
 import edu.mit.csail.sdg.translator.A4Options;
 import edu.mit.csail.sdg.translator.A4Solution;
@@ -159,6 +163,7 @@ public class ModuleDiff {
 	};
 
 	public static A4Options options = new A4Options();
+	public static Map<String,String> sources = new LinkedHashMap<>();
 
 	/**
 	 * instances of rightFile that are not instances of left file
@@ -170,12 +175,24 @@ public class ModuleDiff {
 	public static A4Solution diff(String leftFile, String rightFile, int scope, boolean withPred, Analysis a) {
 
 		Module v1, v2;
+		Map<String,String> cache1 = new LinkedHashMap<>();
+		Map<String,String> cache2 = new LinkedHashMap<>();
 
 		try {
-			v1 = CompUtil.parseEverything_fromFile(rep, null, leftFile);
-			v2 = CompUtil.parseEverything_fromFile(rep, null, rightFile);
+			v1 = CompUtil.parseEverything_fromFile(rep, cache1, leftFile);
+			v2 = CompUtil.parseEverything_fromFile(rep, cache2, rightFile);
 		} catch (Exception e) {
 			throw new RuntimeException("Alloy failed to parse module.", e);
+		}
+
+		sources.clear();
+		sources.putAll(cache1);
+		sources.putAll(cache2);
+
+		try {
+			options.originalFilename = Util.canon(leftFile);
+		} catch (Exception ex) {
+			options.originalFilename = leftFile;
 		}
 
 		return diff(v1, v2, scope, withPred, a);
@@ -205,6 +222,18 @@ public class ModuleDiff {
 			options.solver = SATFactory.DEFAULT;
 		}
 
+		if (options.originalFilename == null || options.originalFilename.isEmpty()) {
+			if (v1 instanceof CompModule && ((CompModule) v1).pos() != null && ((CompModule) v1).pos().filename != null && !((CompModule) v1).pos().filename.isEmpty()) {
+				options.originalFilename = ((CompModule) v1).pos().filename;
+			} else if (v1 != null && v1.path() != null && !v1.path().isEmpty()) {
+				options.originalFilename = v1.path();
+			} else if (v2 instanceof CompModule && ((CompModule) v2).pos() != null && ((CompModule) v2).pos().filename != null && !((CompModule) v2).pos().filename.isEmpty()) {
+				options.originalFilename = ((CompModule) v2).pos().filename;
+			} else if (v2 != null && v2.path() != null && !v2.path().isEmpty()) {
+				options.originalFilename = v2.path();
+			}
+		}
+
 		ModuleMerger m = new ModuleMerger();
 		Collection<Sig> sigs = m.mergeSigs(v1, v2);
 
@@ -217,7 +246,21 @@ public class ModuleDiff {
 	}
 
 	public static A4Solution getSolution(String fileName) {
-		Module v1 = CompUtil.parseEverything_fromFile(rep, null, fileName);
+		Map<String,String> cache = new LinkedHashMap<>();
+		Module v1 = CompUtil.parseEverything_fromFile(rep, cache, fileName);
+		sources.clear();
+		sources.putAll(cache);
+		if (v1 instanceof CompModule && ((CompModule) v1).pos() != null && ((CompModule) v1).pos().filename != null && !((CompModule) v1).pos().filename.isEmpty()) {
+			options.originalFilename = ((CompModule) v1).pos().filename;
+		} else if (v1 != null && v1.path() != null && !v1.path().isEmpty()) {
+			options.originalFilename = v1.path();
+		} else {
+			try {
+				options.originalFilename = Util.canon(fileName);
+			} catch (Exception ex) {
+				options.originalFilename = fileName;
+			}
+		}
 		A4Solution ans = TranslateAlloyToKodkod.execute_command(rep, v1.getAllReachableSigs(), v1.getAllCommands().get(0),
 				options);
 		return ans;

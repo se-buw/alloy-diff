@@ -1833,6 +1833,11 @@ public final class SimpleGUI implements ComponentListener, Listener {
         return ct;
     }
 
+    /** Returns the evaluator Computer. */
+    public static Computer getEvaluator() {
+        return evaluator;
+    }
+
     /** This object performs expression evaluation. */
     private static Computer evaluator = new Computer() {
 
@@ -1863,14 +1868,17 @@ public final class SimpleGUI implements ComponentListener, Listener {
                         mainname = sub.getAttribute("filename");
                         break;
                     }
-                if (mainname == null)
-                    throw new Exception();
                 for (XMLNode sub : x)
                     if (sub.is("source")) {
                         String name = sub.getAttribute("filename");
                         String content = sub.getAttribute("content");
                         fc.put(name, content);
                     }
+                if ((mainname == null || mainname.isEmpty()) && !fc.isEmpty()) {
+                    mainname = fc.keySet().iterator().next();
+                }
+                if (mainname == null || mainname.isEmpty())
+                    throw new Exception("No filename specified in XML instance or source tags.");
                 root = CompUtil.parseEverything_fromFile(A4Reporter.NOP, fc, mainname, (Version.experimental && ImplicitThis.get()) ? 2 : 1);
                 ans = A4SolutionReader.read(root.getAllReachableSigs(), x);
                 for (ExprVar a : ans.getAllAtoms()) {
@@ -1879,8 +1887,16 @@ public final class SimpleGUI implements ComponentListener, Listener {
                 for (ExprVar a : ans.getAllSkolems()) {
                     root.addGlobal(a.label, a);
                 }
+                for (Sig s : ans.getAllReachableSigs()) {
+                    root.addGlobal(s.label, s);
+                    if (s.label.startsWith("this/")) {
+                        root.addGlobal(s.label.substring(5), s);
+                    }
+                }
             } catch (Throwable ex) {
-                throw new ErrorFatal("Failed to read or parse the XML file.");
+                String msg = ex.getMessage();
+                if (msg == null || msg.isEmpty()) msg = ex.toString();
+                throw new ErrorFatal("Failed to read or parse the XML file: " + msg, ex);
             }
             try {
                 Expr e = CompUtil.parseOneExpression_fromString(root, strs[0]);

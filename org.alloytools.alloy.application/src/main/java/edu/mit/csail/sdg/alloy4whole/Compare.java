@@ -1,15 +1,13 @@
 package edu.mit.csail.sdg.alloy4whole;
 
-import java.awt.event.MouseEvent;
-import java.awt.event.MouseListener;
 import java.io.File;
 import java.io.IOException;
-
-import javax.swing.JMenu;
 
 import org.alloytools.alloy.diff.Analysis;
 import org.alloytools.alloy.diff.ModuleDiff;
 
+import edu.mit.csail.sdg.alloy4.Computer;
+import edu.mit.csail.sdg.alloy4.OurDialog;
 import edu.mit.csail.sdg.alloy4viz.VizGUI;
 import edu.mit.csail.sdg.translator.A4Solution;
 
@@ -85,54 +83,57 @@ public class Compare {
 			// This can be useful for debugging.
 			//
 			// You can also write the outcome to an XML file
-			ans.writeXML(ALLOY_EXAMPLE_OUTPUT_XML);
+			try {
+				writeSolutionXML(ans, ALLOY_EXAMPLE_OUTPUT_XML);
+			} catch (Exception ex) {
+				if (log != null) log.logRed(ex.getMessage() + "\r\n");
+			}
 			//
 
-			JMenu m = new JMenu("Next");
-
-			m.addMouseListener(new MouseListener() {
-
+			Computer enumerator = new Computer() {
 				@Override
-				public void mouseReleased(MouseEvent e) {
-					// TODO Auto-generated method stub
-
-				}
-
-				@Override
-				public void mousePressed(MouseEvent e) {
-					Compare.ans = Compare.ans.next();
-					if (ans.satisfiable()) {
-						ans.writeXML(ALLOY_EXAMPLE_OUTPUT_XML);
-						viz.loadXML(ALLOY_EXAMPLE_OUTPUT_XML, true);
-						log.log("Next solution displayed.\r\n");
-					} else {
-						log.log("No more solutions.\r\n");
+				public String compute(Object input) {
+					final String[] arg = (String[]) input;
+					int index = -3;
+					try {
+						index = Integer.parseInt(arg[1]);
+					} catch (NumberFormatException e) {
+						index = -3;
 					}
-					log.flush();
+					try {
+						A4Solution nextAns = Compare.ans.fork(index);
+						if (nextAns.satisfiable()) {
+							Compare.ans = nextAns;
+							writeSolutionXML(Compare.ans, ALLOY_EXAMPLE_OUTPUT_XML);
+							viz.loadXML(ALLOY_EXAMPLE_OUTPUT_XML, true);
+							if (log != null) {
+								// log.log("Next solution displayed.\r\n");
+								log.flush();
+							}
+						} else {
+							if (log != null) {
+								log.log("No more solutions.\r\n");
+								log.flush();
+							}
+							OurDialog.alert(viz.getFrame(), "There are no more satisfying instances.\n\nNote: due to symmetry breaking and other optimizations,\nsome equivalent solutions may have been omitted.");
+						}
+					} catch (Throwable ex) {
+						if (log != null) {
+							log.logRed(ex.getMessage() + "\r\n");
+							log.flush();
+						}
+						OurDialog.alert(viz.getFrame(), ex.getMessage());
+					}
+					return arg[0];
 				}
-
-				@Override
-				public void mouseClicked(MouseEvent arg0) {
-					// TODO Auto-generated method stub
-
-				}
-
-				@Override
-				public void mouseEntered(MouseEvent arg0) {
-					// TODO Auto-generated method stub
-
-				}
-
-				@Override
-				public void mouseExited(MouseEvent arg0) {
-					// TODO Auto-generated method stub
-
-				}
-			});
+			};
 
 			// You can then visualize the XML file by calling this:
-			viz = new VizGUI(false, ALLOY_EXAMPLE_OUTPUT_XML, m);
+			viz = new VizGUI(false, ALLOY_EXAMPLE_OUTPUT_XML, null, enumerator, SimpleGUI.getEvaluator(), 2);
 		}
 	}
 
+	private static void writeSolutionXML(A4Solution sol, String filename) throws Exception {
+		sol.writeXML(filename, null, ModuleDiff.sources);
+	}
 }
