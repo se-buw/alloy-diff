@@ -134,6 +134,21 @@ public class CompareFilesDialog extends JDialog {
 		StringChoicePref tabNamesLeft = new StringChoicePref("LeftFile", "", tabListNames);
 		StringChoicePref tabNamesRight = new StringChoicePref("RightFile", "", tabListNames);
 
+		JComboBox<String> leftCmdCombo = new JComboBox<>();
+		JComboBox<String> rightCmdCombo = new JComboBox<>();
+
+		tabNamesLeft.addChangeListener(new ChangeListener() {
+			@Override
+			public void stateChanged(ChangeEvent e) {
+				updateCommandCombo(leftCmdCombo, tabNamesLeft.getSelectedIndex());
+			}
+		});
+		tabNamesRight.addChangeListener(new ChangeListener() {
+			@Override
+			public void stateChanged(ChangeEvent e) {
+				updateCommandCombo(rightCmdCombo, tabNamesRight.getSelectedIndex());
+			}
+		});
 			
 		JButton compareButton = new JButton("Analyze");
 		JLabel l1 = new JLabel("Find instances of ");
@@ -142,12 +157,15 @@ public class CompareFilesDialog extends JDialog {
 		tabNamesLeft.set(new File(currentViewFile).getName());
 		tabNamesRight.setSelectedIndex(0);
 
-		add(makeGrid(mkCombo(tabAnalysis), l1, mkCombo(tabNamesLeft), l2, mkCombo(tabNamesRight), mkButton(compareButton)));
+		updateCommandCombo(leftCmdCombo, tabNamesLeft.getSelectedIndex());
+		updateCommandCombo(rightCmdCombo, tabNamesRight.getSelectedIndex());
+
+		add(makeGrid(mkCombo(tabAnalysis), l1, mkCombo(tabNamesLeft), leftCmdCombo, l2, mkCombo(tabNamesRight), rightCmdCombo, mkButton(compareButton)));
 
 		setTitle("Semantic Analyses of Alloy Models");
 
 		pack();
-		setSize(getSize().width + 5, getSize().height + 5);
+		setSize(getSize().width + 5, getSize().height + 10);
 		setResizable(true);
 		setLocationRelativeTo(null);
 		setAlwaysOnTop(false);
@@ -180,15 +198,37 @@ public class CompareFilesDialog extends JDialog {
 
 			@Override
 			public void actionPerformed(ActionEvent e) {
-
+				int leftCmdIndex = leftCmdCombo.getSelectedIndex() - 1;
+				int rightCmdIndex = rightCmdCombo.getSelectedIndex() - 1;
 				Compare.CompareModules(fileMap.get(tabNamesLeft.getSelectedIndex()),
-						fileMap.get(tabNamesRight.getSelectedIndex()), tabAnalysis.get(), log);
+						fileMap.get(tabNamesRight.getSelectedIndex()), leftCmdIndex, rightCmdIndex, tabAnalysis.get(), log);
 				dialog.dispose();
 			}
 		});
 	}
 
-	public static JPanel makeGrid(Container methodChoice, Container l1, Container comboLeft, Container l2,Container comboRight, Container buttonCompare) {
+	private void updateCommandCombo(JComboBox<String> combo, int fileIndex) {
+		combo.removeAllItems();
+		combo.addItem("Global (No Command)");
+		if (fileIndex >= 0 && fileIndex < tabsList.size()) {
+			try {
+				String source = tabsList.get(fileIndex).getText();
+				java.util.List<edu.mit.csail.sdg.ast.Command> cmds = edu.mit.csail.sdg.parser.CompUtil.parseOneModule_fromString(source);
+				for (int i = 0; i < cmds.size(); i++) {
+					combo.addItem(cmds.get(i).toString());
+				}
+			} catch (Throwable e) {
+				combo.addItem("Command 0");
+			}
+		}
+		if (combo.getItemCount() > 1) {
+			combo.setSelectedIndex(1);
+		} else {
+			combo.setSelectedIndex(0);
+		}
+	}
+
+	public static JPanel makeGrid(Container... components) {
 		JPanel ans = new JPanel(new GridBagLayout());
 		GridBagConstraints gbc = new GridBagConstraints();
 
@@ -198,33 +238,10 @@ public class CompareFilesDialog extends JDialog {
 
 		gbc.fill = GridBagConstraints.HORIZONTAL;
 		gbc.gridx = 0;
-		gbc.gridy = 0;
-		ans.add(methodChoice, gbc);
-
-		gbc.fill = GridBagConstraints.HORIZONTAL;
-		gbc.gridx = 0;
-		gbc.gridy = 1;
-		ans.add(l1, gbc);
-
-		gbc.fill = GridBagConstraints.HORIZONTAL;
-		gbc.gridx = 0;
-		gbc.gridy = 2;
-		ans.add(comboLeft, gbc);
-
-		gbc.fill = GridBagConstraints.HORIZONTAL;
-		gbc.gridx = 0;
-		gbc.gridy = 3;
-		ans.add(l2, gbc);
-
-		gbc.fill = GridBagConstraints.HORIZONTAL;
-		gbc.gridx = 0;
-		gbc.gridy = 4;
-		ans.add(comboRight, gbc);
-
-		gbc.fill = GridBagConstraints.HORIZONTAL;
-		gbc.gridx = 0;
-		gbc.gridy = 5;
-		ans.add(buttonCompare, gbc);
+		for (int i = 0; i < components.length; i++) {
+			gbc.gridy = i;
+			ans.add(components[i], gbc);
+		}
 
 		return ans;
 	}

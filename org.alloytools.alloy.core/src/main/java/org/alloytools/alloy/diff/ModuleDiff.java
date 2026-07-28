@@ -173,20 +173,16 @@ public class ModuleDiff {
 	 * @return
 	 */
 	public static A4Solution diff(String leftFile, String rightFile, int scope, boolean withPred, Analysis a) {
+		return diff(leftFile, rightFile, 0, 0, scope, withPred, a);
+	}
 
-		Module v1, v2;
+	public static A4Solution diff(String leftFile, String rightFile, int cmdIndex1, int cmdIndex2, int scope, boolean withPred, Analysis a) {
+
 		Map<String,String> cache1 = new LinkedHashMap<>();
-		Map<String,String> cache2 = new LinkedHashMap<>();
-
-		try {
-			v1 = CompUtil.parseEverything_fromFile(rep, cache1, leftFile);
-			v2 = CompUtil.parseEverything_fromFile(rep, cache2, rightFile);
-		} catch (Exception e) {
-			throw new RuntimeException("Alloy failed to parse module.", e);
-		}
-
-		sources.clear();
+		Module v1 = CompUtil.parseEverything_fromFile(rep, cache1, leftFile);
 		sources.putAll(cache1);
+		Map<String,String> cache2 = new LinkedHashMap<>();
+		Module v2 = CompUtil.parseEverything_fromFile(rep, cache2, rightFile);
 		sources.putAll(cache2);
 
 		try {
@@ -195,7 +191,7 @@ public class ModuleDiff {
 			options.originalFilename = leftFile;
 		}
 
-		return diff(v1, v2, scope, withPred, a);
+		return diff(v1, v2, cmdIndex1, cmdIndex2, scope, withPred, a);
 	}
 	
 	public static A4Solution diff(String leftFile, String rightFile, boolean withPred) {
@@ -213,7 +209,7 @@ public class ModuleDiff {
 	 * @param v2
 	 * @return
 	 */
-	private static A4Solution diff(Module v1, Module v2, int scope, boolean withPred, Analysis a) {
+	private static A4Solution diff(Module v1, Module v2, int cmdIndex1, int cmdIndex2, int scope, boolean withPred, Analysis a) {
 
 		options.skolemDepth = 1;
 		if (solver != null) {
@@ -238,7 +234,7 @@ public class ModuleDiff {
 		Collection<Sig> sigs = m.mergeSigs(v1, v2);
 
 		CommandGenerator cg = new CommandGenerator(m);
-		Command diffCommand = cg.generateDiffCommand(v1, v2, scope, withPred, a);			
+		Command diffCommand = cg.generateDiffCommand(v1, v2, cmdIndex1, cmdIndex2, scope, withPred, a);			
 
 		A4Solution ans = TranslateAlloyToKodkod.execute_command(rep, sigs, diffCommand, options);
 

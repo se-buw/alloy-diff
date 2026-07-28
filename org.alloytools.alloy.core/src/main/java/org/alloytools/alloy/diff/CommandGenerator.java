@@ -32,9 +32,13 @@ public class CommandGenerator {
 	 * @return
 	 */
 	public Command generateDiffCommand(Module v1, Module v2, int scope, boolean withPred, Analysis a) {
+		return generateDiffCommand(v1, v2, 0, 0, scope, withPred, a);
+	}
 
-		Command cmd1 = v1.getAllCommands().get(0);
-		Command cmd2 = v2.getAllCommands().get(0);
+	public Command generateDiffCommand(Module v1, Module v2, int cmdIndex1, int cmdIndex2, int scope, boolean withPred, Analysis a) {
+
+		Command cmd1 = (cmdIndex1 >= 0 && v1.getAllCommands().size() > cmdIndex1) ? v1.getAllCommands().get(cmdIndex1) : null;
+		Command cmd2 = (cmdIndex2 >= 0 && v2.getAllCommands().size() > cmdIndex2) ? v2.getAllCommands().get(cmdIndex2) : null;
 
 		int bitwidth = 0;
 		int maxInt = m.maxInt;
@@ -42,7 +46,7 @@ public class CommandGenerator {
 		Expr c1 = null;
 		Expr c2 = null;
 
-		if (withPred) {
+		if (withPred && cmd1 != null && cmd2 != null) {
 			c1 = m.c1.and(m.replaceSigRefs(cmd1.formula, true));
 			c2 = m.c2.and(m.replaceSigRefs(cmd2.formula, false));
 		} else {
@@ -54,16 +58,25 @@ public class CommandGenerator {
 			scope = 3;
 		}
 
-		int maxseq = Math.max(cmd1.maxseq, cmd2.maxseq);
-		int minprefix = Math.max(cmd1.minprefix, cmd2.minprefix);
-		int maxprefix = Math.max(cmd1.maxprefix, cmd2.maxprefix);
-		edu.mit.csail.sdg.ast.ExprVar commandKeyword = (cmd1.commandKeyword != null ? cmd1.commandKeyword : cmd2.commandKeyword);
+		int maxseq1 = cmd1 != null ? cmd1.maxseq : -1;
+		int minprefix1 = cmd1 != null ? cmd1.minprefix : -1;
+		int maxprefix1 = cmd1 != null ? cmd1.maxprefix : -1;
+
+		int maxseq2 = cmd2 != null ? cmd2.maxseq : -1;
+		int minprefix2 = cmd2 != null ? cmd2.minprefix : -1;
+		int maxprefix2 = cmd2 != null ? cmd2.maxprefix : -1;
+
+		int maxseq = Math.max(maxseq1, maxseq2);
+		int minprefix = Math.max(minprefix1, minprefix2);
+		int maxprefix = Math.max(maxprefix1, maxprefix2);
+		
+		edu.mit.csail.sdg.ast.ExprVar commandKeyword = (cmd1 != null && cmd1.commandKeyword != null) ? cmd1.commandKeyword : ((cmd2 != null && cmd2.commandKeyword != null) ? cmd2.commandKeyword : edu.mit.csail.sdg.ast.ExprVar.make(null, "run"));
 
 		Command cmd4scope = new Command(edu.mit.csail.sdg.alloy4.Pos.UNKNOWN, ExprConstant.TRUE, "", false, scope, -1, maxseq, minprefix, maxprefix, -1, null, null, commandKeyword, ExprConstant.TRUE, null);
 		MyScopeComputer sc1 = MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v1Sigs.values(), cmd4scope);
-		MyScopeComputer sc1orig = MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v1Sigs.values(), cmd1);
+		MyScopeComputer sc1orig = cmd1 != null ? MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v1Sigs.values(), cmd1) : sc1;
 		MyScopeComputer sc2 = MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v2Sigs.values(), cmd4scope);
-		MyScopeComputer sc2orig = MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v2Sigs.values(), cmd2);
+		MyScopeComputer sc2orig = cmd2 != null ? MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v2Sigs.values(), cmd2) : sc2;
 		if (!withPred) {
 			sc1orig = sc1;
 			sc2orig = sc2;
@@ -94,7 +107,7 @@ public class CommandGenerator {
 				}
 
 				int scopeInOrig = Math.min(sc1.sig2scope(parent), sc1orig.sig2scope(parent));
-				if (sc1orig.isExact(parent) || cmd1.additionalExactScopes.contains(parent)) {
+				if (sc1orig.isExact(parent) || (cmd1 != null && cmd1.additionalExactScopes.contains(parent))) {
 					c1 = c1.and(union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
 				} else {
 					c1 = c1.and(union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
@@ -127,7 +140,7 @@ public class CommandGenerator {
 				}
 
 				int scopeInOrig = Math.min(sc2.sig2scope(parent), sc2orig.sig2scope(parent));
-				if (sc2orig.isExact(parent) || cmd2.additionalExactScopes.contains(parent)) {
+				if (sc2orig.isExact(parent) || (cmd2 != null && cmd2.additionalExactScopes.contains(parent))) {
 					c2 = c2.and(union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
 				} else {
 					c2 = c2.and(union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
@@ -155,7 +168,7 @@ public class CommandGenerator {
 
 			Sig s1 = m.v1Sigs.get(sName);
 			int scope1 = -1;
-			boolean exact1 = cmd1.additionalExactScopes.contains(s1);
+			boolean exact1 = cmd1 != null && cmd1.additionalExactScopes.contains(s1);
 			if (s1 != null) {
 				scope1 = Math.min(sc1.sig2scope(s1), sc1orig.sig2scope(s1));
 				exact1 |= sc1orig.isExact(s1);
@@ -163,7 +176,7 @@ public class CommandGenerator {
 
 			Sig s2 = m.v2Sigs.get(sName);
 			int scope2 = -1;
-			boolean exact2 = cmd2.additionalExactScopes.contains(s2);
+			boolean exact2 = cmd2 != null && cmd2.additionalExactScopes.contains(s2);
 			if (s2 != null) {
 				scope2 = Math.min(sc2.sig2scope(s2), sc2orig.sig2scope(s2));
 				exact2 |= sc2orig.isExact(s2);
@@ -174,14 +187,24 @@ public class CommandGenerator {
 				// however, if we restrict it, Alloy complains with an error
 				cmd = cmd.change(s, exact1 && exact2, Math.max(scope1, scope2));
 			}
-			// take care of one side exact
-			if (s1 != null && exact1 && !exact2 && scope1 != -1) {
-				c1 = c1.and(s.cardinality().equal(ExprConstant.makeNUMBER(scope1)));
-				changed = true;
+			// explicitly embed cardinality constraints to respect model scopes
+			if (s1 != null && scope1 != -1) {
+				if (exact1) {
+					c1 = c1.and(s.cardinality().equal(ExprConstant.makeNUMBER(scope1)));
+					changed = true;
+				} else if (scope2 != -1 && scope1 < scope2) {
+					c1 = c1.and(s.cardinality().lte(ExprConstant.makeNUMBER(scope1)));
+					changed = true;
+				}
 			}
-			if (s2 != null && !exact1 && exact2 && scope2 != -1) {
-				c2 = c2.and(s.cardinality().equal(ExprConstant.makeNUMBER(scope2)));
-				changed = true;
+			if (s2 != null && scope2 != -1) {
+				if (exact2) {
+					c2 = c2.and(s.cardinality().equal(ExprConstant.makeNUMBER(scope2)));
+					changed = true;
+				} else if (scope1 != -1 && scope2 < scope1) {
+					c2 = c2.and(s.cardinality().lte(ExprConstant.makeNUMBER(scope2)));
+					changed = true;
+				}
 			}
 		}
 
