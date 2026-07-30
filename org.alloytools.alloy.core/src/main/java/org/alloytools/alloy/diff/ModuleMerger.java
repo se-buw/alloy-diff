@@ -516,11 +516,13 @@ public class ModuleMerger {
 
 				c1 = c1.and(alwaysIfVar(e1mult, f1.isVariable != null));
 				if (f1.isVariable == null && f.isVariable != null) {
-					c1 = c1.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f))));
+					// Must quantify over all atosm- all this: Sig | always (this.f' = this.f)
+					c1 = c1.and(ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
 				}
 				c2 = c2.and(alwaysIfVar(e2mult, f2.isVariable != null));
 				if (f2.isVariable == null && f.isVariable != null) {
-					c2 = c2.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f))));
+					// Expr frameBody2 = ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)));
+					c2 = c2.and(ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
 				}
 			} else if (f1.decl().expr instanceof ExprBinary && f2.decl().expr instanceof ExprBinary) { // relational
 																										// fields
@@ -549,11 +551,12 @@ public class ModuleMerger {
 
 					c1 = c1.and(alwaysIfVar(e1mult, f1.isVariable != null));
 					if (f1.isVariable == null && f.isVariable != null) {
-						c1 = c1.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f))));
+						// Must quantify over all atosm- all this: Sig | always (this.f' = this.f)
+						c1 = c1.and(ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
 					}
 					c2 = c2.and(alwaysIfVar(e2mult, f2.isVariable != null));
 					if (f2.isVariable == null && f.isVariable != null) {
-						c2 = c2.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f))));
+						c2 = c2.and(ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
 					}
 				}
 			} else {
