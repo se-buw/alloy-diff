@@ -145,7 +145,17 @@ public class ModuleMerger {
 				if (old instanceof PrimSig) {
 					// check if needed: abstract sigs with children are not needed
 					if (old.isAbstract == null || v1iu.getSubSigs(old) == null) {
-						Sig s = new PrimSig(sName, getCopySigAttributes(old));
+						// ONE to LONE (merged sig may not have exactly one atom)
+						Sig s = null;
+						if (old.isLone != null || old.isOne != null) {
+							s = new PrimSig(sName, old.isVariable != null 
+										? new Attr[]{Attr.LONE, Attr.VARIABLE} 
+										: new Attr[]{Attr.LONE});
+						} else {
+							s = new PrimSig(sName, old.isVariable != null 
+										? new Attr[]{Attr.VARIABLE} 
+										: new Attr[]{});
+						}
 						sigs.put(sName, s);
 						c1 = generateSigAttributeConstraints(s, old, v1iu, c1);
 						// closed world
@@ -160,7 +170,17 @@ public class ModuleMerger {
 				// adding signatures that are unique in v2
 				if (old instanceof PrimSig) {
 					if (old.isAbstract == null || v2iu.getSubSigs(old) == null) {
-						Sig s = new PrimSig(sName, getCopySigAttributes(old));
+						// ONE to LONE (merged sig may not have exactly one atom)
+						Sig s = null;
+						if (old.isLone != null || old.isOne != null) {
+							s = new PrimSig(sName, old.isVariable != null 
+										? new Attr[]{Attr.LONE, Attr.VARIABLE} 
+										: new Attr[]{Attr.LONE});
+						} else {
+							s = new PrimSig(sName, old.isVariable != null 
+										? new Attr[]{Attr.VARIABLE} 
+										: new Attr[]{});
+						}
 						sigs.put(sName, s);
 						c2 = generateSigAttributeConstraints(s, old, v2iu, c2);
 						// closed world
@@ -188,8 +208,8 @@ public class ModuleMerger {
 						union.addAll(ps1);
 						union.addAll(ps2);
 
-						SubsetSig sub = new SubsetSig(s1.label, union);
-						sigs.put(s1.label, sub);
+						SubsetSig sub = new SubsetSig(s1.label, union, getMergedSigAttributes(s1, s2));
+						sigs.put(s1.label, sub);				
 						
 						// suppress additional sigs in each c1/c2
 						Set<Sig> notInV1 = new LinkedHashSet<>();
@@ -199,19 +219,43 @@ public class ModuleMerger {
 						notInV2.addAll(ps1);
 						notInV2.removeAll(ps2);
 						for (Sig s : notInV1) {
-							c1 = c1.and(s.in(sub).not());
+							c1 = c1.and(alwaysIfVar(s.in(sub).not(), sub.isVariable != null));
 						}
 						for (Sig s : notInV2) {
-							c2 = c2.and(s.in(sub).not());
+							c2 = c2.and(alwaysIfVar(s.in(sub).not(), sub.isVariable != null));
 						}
+						c1 = generateSigAttributeConstraints(sub, s1, v1iu, c1);
+						c2 = generateSigAttributeConstraints(sub, s2, v2iu, c2);
 					} else {
 						throw new RuntimeException("Cannot merge PrimSig and SubsetSig with same name: " + s1.label);
 					}
 				} else {
+					List<Attr> attrs = new ArrayList<>();
+					if (s1.isVariable != null) {
+						attrs.add(Attr.VARIABLE);
+					}
+					if (s1.isLone != null || s1.isOne != null) {
+						attrs.add(Attr.LONE);
+					}
+					// SOME Is not added, but enforced in c1
+					// FIXME: EXACT is not added, maybe it should be enforced in c1? 
+					if (s1.isAbstract != null) {
+						attrs.add(Attr.ABSTRACT);
+					}
 					// add v1 unique SubsetSig and suppress in v2 
-					SubsetSig subV1 = new SubsetSig(s1.label, ps1);
+					SubsetSig subV1 = new SubsetSig(s1.label, ps1, attrs.toArray(new Attr[0]));
+					// no need to call generateSigAttributeConstraints(..) as the attributes are the same and will thus enforce the same constraints
 					sigs.put(s1.label, subV1);
-					c2 = c2.and(subV1.no());
+
+					if (s1.isSome != null) {
+						// if the sig is some then it must be some in the merged module
+						c1 = c1.and(alwaysIfVar(subV1.some(), subV1.isVariable != null));
+					}
+					if (s1.isOne != null) {
+						// if the sig is one then it must be one in the merged module
+						c1 = c1.and(alwaysIfVar(subV1.one(), subV1.isVariable != null));
+					}
+					c2 = c2.and(alwaysIfVar(subV1.no(), subV1.isVariable != null));					
 				}
 			}
 		}
@@ -221,8 +265,9 @@ public class ModuleMerger {
 				if (sigs.get(s2.label) == null) {
 					Set<Sig> ps2 = parents((SubsetSig) s2);
 					SubsetSig subV2 = new SubsetSig(s2.label, ps2);
+					// no need to call generateSigAttributeConstraints(..) as the attributes are the same and will thus enforce the same constraints
 					sigs.put(s2.label, subV2);
-					c1 = c1.and(subV2.no());				
+					c1 = c1.and(alwaysIfVar(subV2.no(), subV2.isVariable != null));				
 				} else if (sigs.get(s2.label) instanceof PrimSig) {
 					throw new RuntimeException("Cannot merge PrimSig and SubsetSig with same name: " + s2.label);
 				}
@@ -421,15 +466,9 @@ public class ModuleMerger {
 	 * @return
 	 */
 	private Sig mergeSig(Sig s1, Sig s2) {
-		Sig s = new PrimSig(s1.label, getCommonSigAttributes(s1, s2));
+		Sig s = new PrimSig(s1.label, getMergedSigAttributes(s1, s2));
 		c1 = generateSigAttributeConstraints(s, s1, v1iu, c1);
-		if (s1.isVariable == null && s.isVariable != null) {
-			c1 = c1.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, s.prime(), s)));
-		}
 		c2 = generateSigAttributeConstraints(s, s2, v2iu, c2);
-		if (s2.isVariable == null && s.isVariable != null) {
-			c2 = c2.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, s.prime(), s)));
-		}
 
 		return s;
 	}
@@ -1093,22 +1132,10 @@ public class ModuleMerger {
 		return e;
 	}
 
-	private Attr[] getCopySigAttributes(Sig old) {
-		List<Attr> attrs = new ArrayList<>();
-		for (Attr a : old.attributes) {
-			if (a != null) {
-				if (a.type == Attr.AttrType.ONE) {
-					attrs.add(Attr.AttrType.LONE.make(a.pos));
-				} else {
-					attrs.add(a.type.make(a.pos));
-				}
-			}
-		}
-		return attrs.toArray(new Attr[] {});
-	}
+
 
 	private Expr generateSigAttributeConstraints(Sig s, Sig old, InheritanceUtil iu, Expr c) {
-		boolean isVar = (old.isVariable != null);
+		boolean isVar = (s.isVariable != null); // if merged sig is var (likely old was not) then constraints of old need to be wrapped in always
 		if (old.isAbstract != null && s.isAbstract == null) {
 			// without inheritance, abstract has no impact
 			if (iu.getSubSigs(old) != null) {
@@ -1128,18 +1155,27 @@ public class ModuleMerger {
 			c = c.and(alwaysIfVar(s.some(), isVar));
 		}
 
+		// check if merged one is var and old was not, then we need to add a constraint that the value of the signature does not change over time
+		if (old.isVariable == null && isVar) {
+			c = c.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, s.prime(), s)));
+		}
+
 		return c;
 	}
 
 	/**
-	 * keep all common attributes FIXME for multiplicities is should be better to
-	 * take the least upper bound
+	 * merges the attributes of two old signatures for a new one
+	 * 
+	 * if one of them is var then the merged signature is also var
+	 * 
+	 * for oher attributes: keep all common attributes FIXME for multiplicities is should be better to
+	 * take the least upper bound (this is now handled by the generateSigAttributeConstraints(..) method)
 	 * 
 	 * @param s1
 	 * @param s2
 	 * @return
 	 */
-	private Attr[] getCommonSigAttributes(Sig s1, Sig s2) {
+	private Attr[] getMergedSigAttributes(Sig s1, Sig s2) {
 		List<Attr> attrs = new ArrayList<>();
 		for (Attr a1 : s1.attributes) {
 			for (Attr a2 : s2.attributes) {
