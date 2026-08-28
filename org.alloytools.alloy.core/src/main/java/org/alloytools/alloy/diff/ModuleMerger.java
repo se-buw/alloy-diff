@@ -227,7 +227,7 @@ public class ModuleMerger {
 						c1 = generateSigAttributeConstraints(sub, s1, v1iu, c1);
 						
 						for (Attr attr : s1.attributes) {
-							if (attr.type == Attr.AttrType.EXACT) {
+						if (attr != null && attr.type == Attr.AttrType.EXACT) {
 								// make sub equal to ps1 union (sigs in v1)
 								c1 = c1.and(alwaysIfVar(sub.equal(makePlus(ps1)), sub.isVariable != null));
 							}
@@ -235,7 +235,7 @@ public class ModuleMerger {
 						
 						c2 = generateSigAttributeConstraints(sub, s2, v2iu, c2);
 						for (Attr attr : s2.attributes) {
-							if (attr.type == Attr.AttrType.EXACT) {
+						if (attr != null && attr.type == Attr.AttrType.EXACT) {
 								// make sub equal to ps1 union (sigs in v1)
 								c2 = c2.and(alwaysIfVar(sub.equal(makePlus(ps2)), sub.isVariable != null));
 							}
@@ -345,7 +345,7 @@ public class ModuleMerger {
 		}
 		// EXACT is not added to unique SubsetSigs, but enforced here
 		for (Attr attr : oldSig.attributes) {
-			if (attr.type == Attr.AttrType.EXACT) {
+			if (attr != null && attr.type == Attr.AttrType.EXACT) {
 				// make sub equal to ps1 union (sigs in v1)
 				c1 = c1.and(alwaysIfVar(subV1.equal(makePlus(newParents)), subV1.isVariable != null));
 			}
