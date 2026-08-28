@@ -245,39 +245,7 @@ public class ModuleMerger {
 					}
 				} else {
 					// SubSetSig is unique in v1, add it and suppress in v2
-					List<Attr> attrs = new ArrayList<>();
-					if (s1.isVariable != null) {
-						attrs.add(Attr.VARIABLE);
-					}
-					if (s1.isLone != null || s1.isOne != null) {
-						attrs.add(Attr.LONE);
-					}
-					// SOME Is not added, but enforced in c1
-					if (s1.isAbstract != null) {
-						attrs.add(Attr.ABSTRACT);
-					}
-					// add v1 unique SubsetSig and suppress in v2 
-					SubsetSig subV1 = new SubsetSig(s1.label, ps1, attrs.toArray(new Attr[0]));
-					// no need to call generateSigAttributeConstraints(..) as the attributes are the same and will thus enforce the same constraints
-					sigs.put(s1.label, subV1);
-
-					if (s1.isSome != null) {
-						// if the sig is some then it must be some in the merged module
-						c1 = c1.and(alwaysIfVar(subV1.some(), subV1.isVariable != null));
-					}
-					if (s1.isOne != null) {
-						// if the sig is one then it must be one in the merged module
-						c1 = c1.and(alwaysIfVar(subV1.one(), subV1.isVariable != null));
-					}
-					// EXACT is not added to unique SubsetSigs, but enforced here
-					for (Attr attr : s1.attributes) {
-						if (attr.type == Attr.AttrType.EXACT) {
-							// make sub equal to ps1 union (sigs in v1)
-							c1 = c1.and(alwaysIfVar(subV1.equal(makePlus(ps1)), subV1.isVariable != null));
-						}
-					}
-					
-					c2 = c2.and(alwaysIfVar(subV1.no(), subV1.isVariable != null));					
+					addUniqueSubsetSig(s1, ps1, c1, c2);					
 				}
 			}
 		}
@@ -286,10 +254,7 @@ public class ModuleMerger {
 			if (s2 instanceof SubsetSig) {
 				if (sigs.get(s2.label) == null) { // we have not handled it in the above cases, i.e., it is unique in v2
 					Set<Sig> ps2 = parents((SubsetSig) s2);
-					SubsetSig subV2 = new SubsetSig(s2.label, ps2);
-					// no need to call generateSigAttributeConstraints(..) as the attributes are the same and will thus enforce the same constraints
-					sigs.put(s2.label, subV2);
-					c1 = c1.and(alwaysIfVar(subV2.no(), subV2.isVariable != null));				
+					addUniqueSubsetSig(s2, ps2, c2, c1);
 				} else if (sigs.get(s2.label) instanceof PrimSig) {
 					throw new RuntimeException("Cannot merge PrimSig and SubsetSig with same name: " + s2.label);
 				}
@@ -351,6 +316,42 @@ public class ModuleMerger {
 		addSignatureFacts(v2, false);
 
 		return sigs.values();
+	}
+
+	private void addUniqueSubsetSig(Sig oldSig, Set<Sig> newParents, Expr c1, Expr c2) {
+		List<Attr> attrs = new ArrayList<>();
+		if (oldSig.isVariable != null) {
+			attrs.add(Attr.VARIABLE);
+		}
+		if (oldSig.isLone != null || oldSig.isOne != null) {
+			attrs.add(Attr.LONE);
+		}
+		// SOME Is not added, but enforced in c1
+		if (oldSig.isAbstract != null) {
+			attrs.add(Attr.ABSTRACT);
+		}
+		// add v1 unique SubsetSig and suppress in v2 
+		SubsetSig subV1 = new SubsetSig(oldSig.label, newParents, attrs.toArray(new Attr[0]));
+		// no need to call generateSigAttributeConstraints(..) as the attributes are the same and will thus enforce the same constraints
+		sigs.put(oldSig.label, subV1);
+
+		if (oldSig.isSome != null) {
+			// if the sig is some then it must be some in the merged module
+			c1 = c1.and(alwaysIfVar(subV1.some(), subV1.isVariable != null));
+		}
+		if (oldSig.isOne != null) {
+			// if the sig is one then it must be one in the merged module
+			c1 = c1.and(alwaysIfVar(subV1.one(), subV1.isVariable != null));
+		}
+		// EXACT is not added to unique SubsetSigs, but enforced here
+		for (Attr attr : oldSig.attributes) {
+			if (attr.type == Attr.AttrType.EXACT) {
+				// make sub equal to ps1 union (sigs in v1)
+				c1 = c1.and(alwaysIfVar(subV1.equal(makePlus(newParents)), subV1.isVariable != null));
+			}
+		}
+		
+		c2 = c2.and(alwaysIfVar(subV1.no(), subV1.isVariable != null));
 	}
 
 	/**
