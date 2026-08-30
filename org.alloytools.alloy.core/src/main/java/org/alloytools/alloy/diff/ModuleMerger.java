@@ -263,30 +263,38 @@ public class ModuleMerger {
 
 		// add containment of SubsetSigs in hierarchy:
 		// for sig A in B ... {} add c1/c2 A in B
-		// FIXME this must be that the child in the union of all its parents
+		// REVIEW: this must be that the child in the union of all its parents
 		for (Sig s : v1Sigs.values()) {
 			if (s instanceof SubsetSig) {
 				SubsetSig sub = (SubsetSig) s;
-				for (int i = 0; i < sub.parents.size(); i++) {
-					Sig parent = sub.parents.get(i);
-					if (parent instanceof SubsetSig) {
-						Sig p = sigs.get(parent.label);
-						Sig c = sigs.get(sub.label);
-						c1 = c1.and(c.in(p));
+				Sig c = sigs.get(sub.label);
+				if (c == null) continue;
+				Expr parentUnion = null;
+				for (Sig parent : sub.parents) {
+					Sig p = sigs.get(parent.label);
+					if (p != null) {
+						parentUnion = (parentUnion == null) ? p : parentUnion.plus(p);
 					}
+				}
+				if (parentUnion != null) {
+					c1 = c1.and(alwaysIfVar(c.in(parentUnion), sub.isVariable != null));
 				}
 			}
 		}
 		for (Sig s : v2Sigs.values()) {
 			if (s instanceof SubsetSig) {
 				SubsetSig sub = (SubsetSig) s;
-				for (int i = 0; i < sub.parents.size(); i++) {
-					Sig parent = sub.parents.get(i);
-					if (parent instanceof SubsetSig) {
-						Sig p = sigs.get(parent.label);
-						Sig c = sigs.get(sub.label);
-						c2 = c2.and(c.in(p));
+				Sig c = sigs.get(sub.label);
+				if (c == null) continue;
+				Expr parentUnion = null;
+				for (Sig parent : sub.parents) {
+					Sig p = sigs.get(parent.label);
+					if (p != null) {
+						parentUnion = (parentUnion == null) ? p : parentUnion.plus(p);
 					}
+				}
+				if (parentUnion != null) {
+					c2 = c2.and(alwaysIfVar(c.in(parentUnion), sub.isVariable != null));
 				}
 			}
 		}
