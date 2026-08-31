@@ -19,9 +19,14 @@ import org.junit.Test;
 
 import edu.mit.csail.sdg.alloy4.A4Reporter;
 import edu.mit.csail.sdg.alloy4.ErrorWarning;
+import edu.mit.csail.sdg.ast.Command;
+import edu.mit.csail.sdg.ast.Expr;
 import edu.mit.csail.sdg.ast.Module;
 import edu.mit.csail.sdg.ast.Sig;
 import edu.mit.csail.sdg.parser.CompUtil;
+import edu.mit.csail.sdg.translator.A4Options;
+import edu.mit.csail.sdg.translator.A4Solution;
+import edu.mit.csail.sdg.translator.TranslateAlloyToKodkod;
 
 public class ModuleMergerTest {
 
@@ -303,41 +308,107 @@ public class ModuleMergerTest {
     @Test
     public void testSubsetSigExact() throws Exception {
         // Defining C exactly as A in module1 and exactly as B in module2
-        String module1 = "sig A, B {}\n" + "sig C = A {}\n";
-        String module2 = "sig A, B {}\n" + "sig C = B {}\n";
-
-        Module v1 = CompUtil.parseEverything_fromString(rep, module1);
-        Module v2 = CompUtil.parseEverything_fromString(rep, module2);
-
-        ModuleMerger merger = new ModuleMerger();
-        merger.mergeSigs(v1, v2);
-
-        String c1Str = merger.c1.toString();
-        String c2Str = merger.c2.toString();
-
-        assertTrue("c1 should contain equality for exact subset sig A", c1Str.contains("this/C = this/A"));
-
-        assertTrue("c2 should contain equality for exact subset sig B", c2Str.contains("this/C = this/B"));
+        String module1 = """
+        sig A, B {}
+        sig C = A {}
+        """;
+        String module2 = """
+        sig A, B {}
+        sig C = B {}
+        """;
+        
+        String pred = "some A & B";
+        checkV2notV1(module1, module2, pred, false);
+        checkV2notV1(module2, module1, pred, false);
+        pred = "some C";
+        checkV2notV1(module1, module2, pred, true);
     }
 
     @Test
     public void testSubsetSigMultipleParents() throws Exception {
-        String module1 = "sig A, B, D {}\n" + "sig C in A + B {}\n";
-        String module2 = "sig A, B, D {}\n" + "sig C in A + D {}\n";
+        String module1 = """
+        sig A, B, D {}
+        sig C in A + B {}
+        """;
+        String module2 = """
+        sig A, B, D {}
+        sig C in A + D {}
+        """;
+        String pred = "some C & A";
+        checkV2notV1(module1, module2, pred, true);
+        checkV2notV1(module2, module1, pred, true);
+    }
 
+    @Test
+    public void testSubsetSigMultipleIndirecParents() throws Exception {
+        String module1 = """
+        sig A, B {}
+        sig D extends B {}
+        sig C in A + B {}
+        """;
+        String module2 = """
+        sig A, B, D {}
+        sig C in A + D {}
+        """;
+
+        String pred = "some C & B";
+        checkV2notV1(module1, module2, pred, false);
+        checkV2notV1(module2, module1, pred, true);
+    }
+
+    @Test
+    public void testSubsetSigHierarchyRestore() throws Exception {
+        String module1 = """
+        sig A, B {}
+        sig C in A {}
+        sig D in C + B {}
+        """;
+        String module2 = """
+        sig A, B {}
+        sig C in A + B {}
+        """;
+
+        String pred = "some C & B";
+        checkV2notV1(module1, module2, pred, true);
+        checkV2notV1(module2, module1, pred, false);
+
+        pred = "some D";
+        checkV2notV1(module2, module1, pred, true);
+    }
+
+    public void checkV2notV1(String module1, String module2, String pred, boolean satisfiable) {
         Module v1 = CompUtil.parseEverything_fromString(rep, module1);
-        Module v2 = CompUtil.parseEverything_fromString(rep, module2);
+
+        String v2withPred = module2 + "fact {" + pred + "}";
+        Module v2 = CompUtil.parseEverything_fromString(rep, v2withPred);
 
         ModuleMerger merger = new ModuleMerger();
-        merger.mergeSigs(v1, v2);
+        Collection<Sig> mergedSigs = merger.mergeSigs(v1, v2);
 
-        String c1Str = merger.c1.toString();
-        String c2Str = merger.c2.toString();
+        CommandGenerator cg = new CommandGenerator(merger);
+        Command diffCommand = cg.generateDiffCommand(v1, v2, 3, false, Analysis.SemDiff);
+		//Command diffCommand = new Command(false, 3, 4, 4, merger.c2.and(merger.c1.not()));
 
-        // In v1, C is in A + B, so we expect this union constraint
-        assertTrue("c1 should enforce subset in union of A and B", c1Str.contains("this/C in this/A + this/B"));
+		A4Solution ans = TranslateAlloyToKodkod.execute_command(rep, mergedSigs, diffCommand, new A4Options());
+    
+        assertEquals(satisfiable, ans.satisfiable());
+    }
 
-        // In v2, C is in A + D, so we expect this union constraint
-        assertTrue("c2 should enforce subset in union of A and D", c2Str.contains("this/C in this/A + this/D"));
+    public void checkEquivalent(String module1, String module2, String pred, boolean satisfiable){
+        Module v1 = CompUtil.parseEverything_fromString(rep, module1);
+
+        String v2withPred = module2 + "fact {" + pred + "}";
+        Module v2 = CompUtil.parseEverything_fromString(rep, v2withPred);
+
+        ModuleMerger merger = new ModuleMerger();
+        Collection<Sig> mergedSigs = merger.mergeSigs(v1, v2);
+
+        CommandGenerator cg = new CommandGenerator(merger);
+        Command diffCommand = cg.generateDiffCommand(v1, v2, 3, false, Analysis.Equivalence);
+		//Command diffCommand = new Command(false, 3, 4, 4, merger.c2.and(merger.c1.not()));
+
+		A4Solution ans = TranslateAlloyToKodkod.execute_command(rep, mergedSigs, diffCommand, new A4Options());
+    
+        assertEquals(satisfiable, ans.satisfiable());
     }
 }
