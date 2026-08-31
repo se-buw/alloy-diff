@@ -77,6 +77,9 @@ public class ModuleMerger {
 	 */
 	protected Expr c2;
 
+	private record ExprPair(Expr e1, Expr e2) {
+	}
+
 	protected Map<String, Sig> v1Sigs;
 	protected Map<String, Sig> v2Sigs;
 
@@ -219,10 +222,10 @@ public class ModuleMerger {
 						notInV2.addAll(ps1);
 						notInV2.removeAll(ps2);
 						for (Sig s : notInV1) {
-							c1 = c1.and(alwaysIfVar(s.in(sub).not(), sub.isVariable != null));
+							c1 = c1.and(alwaysIfVar(s.intersect(sub).no(), sub.isVariable != null));
 						}
 						for (Sig s : notInV2) {
-							c2 = c2.and(alwaysIfVar(s.in(sub).not(), sub.isVariable != null));
+							c2 = c2.and(alwaysIfVar(s.intersect(sub).no(), sub.isVariable != null));
 						}
 						c1 = generateSigAttributeConstraints(sub, s1, v1iu, c1);
 						
@@ -245,7 +248,9 @@ public class ModuleMerger {
 					}
 				} else {
 					// SubSetSig is unique in v1, add it and suppress in v2
-					addUniqueSubsetSig(s1, ps1, c1, c2);					
+					ExprPair cs = addUniqueSubsetSig(s1, ps1, c1, c2);
+					c1 = cs.e1();
+					c2 = cs.e2();
 				}
 			}
 		}
@@ -254,50 +259,20 @@ public class ModuleMerger {
 			if (s2 instanceof SubsetSig) {
 				if (sigs.get(s2.label) == null) { // we have not handled it in the above cases, i.e., it is unique in v2
 					Set<Sig> ps2 = parents((SubsetSig) s2);
-					addUniqueSubsetSig(s2, ps2, c2, c1);
+					ExprPair cs = addUniqueSubsetSig(s2, ps2, c2, c1);
+					c2 = cs.e1();
+					c1 = cs.e2();
 				} else if (sigs.get(s2.label) instanceof PrimSig) {
 					throw new RuntimeException("Cannot merge PrimSig and SubsetSig with same name: " + s2.label);
 				}
 			}
 		}
 
-		// add containment of SubsetSigs in hierarchy:
-		// for sig A in B ... {} add c1/c2 A in B
-		// REVIEW: this must be that the child in the union of all its parents
-		for (Sig s : v1Sigs.values()) {
-			if (s instanceof SubsetSig) {
-				SubsetSig sub = (SubsetSig) s;
-				Sig c = sigs.get(sub.label);
-				if (c == null) continue;
-				Expr parentUnion = null;
-				for (Sig parent : sub.parents) {
-					Sig p = sigs.get(parent.label);
-					if (p != null) {
-						parentUnion = (parentUnion == null) ? p : parentUnion.plus(p);
-					}
-				}
-				if (parentUnion != null) {
-					c1 = c1.and(alwaysIfVar(c.in(parentUnion), sub.isVariable != null));
-				}
-			}
-		}
-		for (Sig s : v2Sigs.values()) {
-			if (s instanceof SubsetSig) {
-				SubsetSig sub = (SubsetSig) s;
-				Sig c = sigs.get(sub.label);
-				if (c == null) continue;
-				Expr parentUnion = null;
-				for (Sig parent : sub.parents) {
-					Sig p = sigs.get(parent.label);
-					if (p != null) {
-						parentUnion = (parentUnion == null) ? p : parentUnion.plus(p);
-					}
-				}
-				if (parentUnion != null) {
-					c2 = c2.and(alwaysIfVar(c.in(parentUnion), sub.isVariable != null));
-				}
-			}
-		}
+		// add containment of SubsetSigs in hierarchy (removed above as it could be contradicting in the two versions):
+		// for sig A in B + C ... {} add c1/c2 A in B + C
+		c1 = restoreSubSetSigHierarchy(v1Sigs, c1);
+		c2 = restoreSubSetSigHierarchy(v2Sigs, c2);
+	
 
 		// add fields to merged signatures
 		for (String sName : sigs.keySet()) {
@@ -326,7 +301,25 @@ public class ModuleMerger {
 		return sigs.values();
 	}
 
-	private void addUniqueSubsetSig(Sig oldSig, Set<Sig> newParents, Expr c1, Expr c2) {
+	private Expr restoreSubSetSigHierarchy(Map<String, Sig> oldSigs, Expr cOld) {
+		for (Sig s : oldSigs.values()) {
+			if (s instanceof SubsetSig) {
+				SubsetSig sub = (SubsetSig) s;
+				Expr parentUnion = null;
+				for (Sig parent : sub.parents) {
+					Sig p = sigs.get(parent.label);
+					parentUnion = (parentUnion == null) ? p : parentUnion.plus(p);
+				}
+				if (parentUnion != null) {
+					Sig c = sigs.get(sub.label);
+					cOld = cOld.and(alwaysIfVar(c.in(parentUnion), c.isVariable != null));
+				}
+			}
+		}
+		return cOld;
+	}
+
+	private ExprPair addUniqueSubsetSig(Sig oldSig, Set<Sig> newParents, Expr c1, Expr c2) {
 		List<Attr> attrs = new ArrayList<>();
 		if (oldSig.isVariable != null) {
 			attrs.add(Attr.VARIABLE);
@@ -360,6 +353,7 @@ public class ModuleMerger {
 		}
 		
 		c2 = c2.and(alwaysIfVar(subV1.no(), subV1.isVariable != null));
+		return new ExprPair(c1, c2);
 	}
 
 	/**
