@@ -1,7 +1,10 @@
 package org.alloytools.alloy.diff;
 
+import static edu.mit.csail.sdg.ast.Sig.UNIV;
+
 import java.util.ArrayList;
 import java.util.Collection;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
@@ -523,36 +526,54 @@ public class ModuleMerger {
 	 * lower arity could be padded with a singleton signature. However, this would
 	 * require changing all expressions on fields.
 	 * 
-	 * FIXME the stack could run into a cycle: break the cycle by adding a field
-	 * with its type (i.e., no syntactical restriction)
+	 * the stack could run into a cycle: we break the cycle by adding a field
+	 * with generalFieldType(...)
 	 *
 	 * @param mergedSig
-	 * @param fields1
-	 * @param fields2
+	 * @param fields1 fields of signature mergedSig.label in v1
+	 * @param fields2 fields of signature mergedSig.label in v2
 	 */
 	private void mergeFields(Sig mergedSig, Map<String, Field> fields1, Map<String, Field> fields2) {
 		Set<String> fNames = new LinkedHashSet<String>();
 
 		fNames.addAll(fields1.keySet());
 		fNames.addAll(fields2.keySet());
+		
+		Set<String> processedFields = new HashSet<>();
 
 		for (String fName : fNames) {
 			Stack<String> fieldsToAdd = new Stack<>();
-			if (getField(mergedSig, fName) == null) {
+			if (!processedFields.contains(fName)) {
 				fieldsToAdd.push(fName);
 			}
 			while (!fieldsToAdd.empty()) {
 				String nextField = fieldsToAdd.peek();
-				if (getField(mergedSig, nextField) == null) {
+				if (!processedFields.contains(nextField)) {
 					try {
 						sigOverrideForField = mergedSig.label;
 						mergeField(mergedSig, fields1.get(nextField), fields2.get(nextField));
 						sigOverrideForField = null;
+						processedFields.add(nextField);
 						fieldsToAdd.pop();
 					} catch (RuntimeException e) {
+						sigOverrideForField = null;
 						if (e.getMessage() != null && e.getMessage().contains("Could not find merged field ")) {
 							String missingField = e.getMessage().replace("Could not find merged field ", "");
-							fieldsToAdd.push(missingField);
+							Field missingF1 = fields1.get(missingField);
+							Field missingF2 = fields2.get(missingField);
+							if (fieldsToAdd.contains(missingField)) {
+								// We have a field cycle: break it by creating a permissive placeholder for the
+								// missing dependency, using the missing field's type rather than the current field's.
+								if (getField(mergedSig, missingField) == null && (missingF1 != null || missingF2 != null)) {
+									mergedSig.addField(missingField, generalFieldType(missingF1, missingF2));
+								}
+								// We leave nextField on the stack and let the loop naturally retry it.
+								// If nextField depends on multiple unmerged fields, this retry
+								// will safely catch the next missing dependency and push it.
+							} else {
+								// Add the missing field to the stack to be processed first.
+								fieldsToAdd.push(missingField);
+							}
 						} else {
 							throw e;
 						}
@@ -565,6 +586,50 @@ public class ModuleMerger {
 
 	}
 
+	/**
+	 * Creates a bounding expression of arity N-1 for a field of arity N
+	 * by stripping the first column of the field's type.
+	 */
+	private Expr boundExprForType(Type type) {
+		if (type == null) return UNIV;
+		Expr res = null;
+		for (ProductType pt : type) {
+			Expr prod = null;
+			// Skip the first column (the owner signature) to get the bound type
+			for (int i = 1; i < pt.arity(); i++) {
+				Sig s = sigs.get(pt.get(i).label);
+				if (s == null) {
+					s = getInternalSig(pt.get(i).label);
+				}
+				if (s == null) {
+					s = UNIV;
+				}
+				if (prod == null) prod = s;
+				else prod = prod.product(s);
+			}
+			if (prod == null) prod = UNIV;
+			
+			if (res == null) res = prod;
+			else res = res.plus(prod);
+		}
+		return res != null ? res : UNIV;
+	}
+
+	private Expr generalFieldType(Field f1, Field f2) {
+		Expr type1 = (f1 == null) ? null : boundExprForType(f1.type());
+		Expr type2 = (f2 == null) ? null : boundExprForType(f2.type());
+		if (type1 == null) {
+			return type2;
+		}
+		if (type2 == null) {
+			return type1;
+		}
+		if (type1.isSame(type2)) {
+			return type1;
+		}
+		return type1.plus(type2);
+	}
+
 	private void mergeField(Sig mergedSig, Field f1, Field f2) {
 		List<Decl> names = new ArrayList<>();
 		names.add(mergedSig.decl);
@@ -574,14 +639,16 @@ public class ModuleMerger {
 			if (f1.decl().expr instanceof ExprUnary && f2.decl().expr instanceof ExprUnary) { // unary fields
 				ExprUnary e1 = (ExprUnary) replaceSigRefs(f1.decl().expr, names, true);
 				ExprUnary e2 = (ExprUnary) replaceSigRefs(f2.decl().expr, names, false);
-				Field f;
-
+				
 				Expr union = e1.sub.isSame(e2.sub) ? e1.sub : e1.sub.plus(e2.sub);
 				ExprUnary.Op op = getMergeOp(e1.op, e2.op);
 				if (v1iu.getFieldsFromSubsetSig().contains(f1) || v2iu.getFieldsFromSubsetSig().contains(f2)) {
 					op = getMergeOp(op, ExprUnary.Op.NO);
 				}
-				f = mergedSig.addField(f1.label, op.make(f1.pos, union), isVar);
+				Field f = (Field) getField(mergedSig, f1.label);
+				if (f == null) {
+					f = mergedSig.addField(f1.label, op.make(f1.pos, union), isVar);
+				}
 
 				Decl ths = mergedSig.decl;
 				Expr quantBody1 = ths.get().join(f).in(e1);
@@ -611,36 +678,38 @@ public class ModuleMerger {
 																										// fields
 				Expr e1 = replaceSigRefs(f1.decl().expr, names, true);
 				Expr e2 = replaceSigRefs(f2.decl().expr, names, false);
-				Field f;
-				if (e1.isSame(e2)) {
-					f = mergedSig.addField(f1.label, e1, isVar);
-				} else {
-					Expr union = replaceArrows(e1).plus(replaceArrows(e2));
-					f = mergedSig.addField(f1.label, union, isVar);
+				Field f = (Field) getField(mergedSig, f1.label);
+				if (f == null) {
+					if (e1.isSame(e2)) {
+						f = mergedSig.addField(f1.label, e1, isVar);
+					} else {
+						Expr union = replaceArrows(e1).plus(replaceArrows(e2));
+						f = mergedSig.addField(f1.label, union, isVar);
+					}
+				}
 
-					Decl ths = mergedSig.decl;
-					Expr quantBody1 = ths.get().join(f).in(e1);
-					if (v1iu.getFieldsFromSubsetSig().contains(f1)) {
-						quantBody1 = ExprITE.make(f1.pos, ths.get().in(sigs.get(f1.sig.label)),
-								ths.get().join(f).in(e1), ths.get().join(f).no());
-					}
-					Expr quantBody2 = ths.get().join(f).in(e2);
-					if (v2iu.getFieldsFromSubsetSig().contains(f2)) {
-						quantBody2 = ExprITE.make(f2.pos, ths.get().in(sigs.get(f2.sig.label)),
-								ths.get().join(f).in(e2), ths.get().join(f).no());
-					}
-					Expr e1mult = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), quantBody1);
-					Expr e2mult = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), quantBody2);
+				Decl ths = mergedSig.decl;
+				Expr quantBody1 = ths.get().join(f).in(e1);
+				if (v1iu.getFieldsFromSubsetSig().contains(f1)) {
+					quantBody1 = ExprITE.make(f1.pos, ths.get().in(sigs.get(f1.sig.label)),
+							ths.get().join(f).in(e1), ths.get().join(f).no());
+				}
+				Expr quantBody2 = ths.get().join(f).in(e2);
+				if (v2iu.getFieldsFromSubsetSig().contains(f2)) {
+					quantBody2 = ExprITE.make(f2.pos, ths.get().in(sigs.get(f2.sig.label)),
+							ths.get().join(f).in(e2), ths.get().join(f).no());
+				}
+				Expr e1mult = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), quantBody1);
+				Expr e2mult = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), quantBody2);
 
-					c1 = c1.and(alwaysIfVar(e1mult, f1.isVariable != null));
-					if (f1.isVariable == null && f.isVariable != null) {
-						// Must quantify over all atosm- all this: Sig | always (this.f' = this.f)
-						c1 = c1.and(ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
-					}
-					c2 = c2.and(alwaysIfVar(e2mult, f2.isVariable != null));
-					if (f2.isVariable == null && f.isVariable != null) {
-						c2 = c2.and(ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
-					}
+				c1 = c1.and(alwaysIfVar(e1mult, f1.isVariable != null));
+				if (f1.isVariable == null && f.isVariable != null) {
+					// Must quantify over all atosm- all this: Sig | always (this.f' = this.f)
+					c1 = c1.and(ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
+				}
+				c2 = c2.and(alwaysIfVar(e2mult, f2.isVariable != null));
+				if (f2.isVariable == null && f.isVariable != null) {
+					c2 = c2.and(ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
 				}
 			} else {
 				throw new RuntimeException("Mix of field arities " + f1.pos);
@@ -902,7 +971,7 @@ public class ModuleMerger {
 			Type t = ev.type();
 			if (ev.label.equals("this")) {
 				// TODO check whether this is always right
-				return getExprVarToSig(ev);
+				return getExprVarToSig(ev, inV1);
 			}
 			ExprVar ret = ExprVar.make(ev.pos, ev.label, replaceSigRefs(t, inV1));
 			return ret;
@@ -960,29 +1029,39 @@ public class ModuleMerger {
 
 	private Func replaceSigRefs(Func fun, boolean inV1) {
 		List<Decl> decls = new ArrayList<Decl>();
-		// FIXME some functions have a decl that refernces a signature as this
+		// REVIEW some functions have a decl that refernces a signature as this
 		// ..\models-master\ietf-rfcs\rfc7617-BasicAuth\basic-auth.als
 		// fun Charset.binary[ s : String ] : Binary {this.maps[s]}
+		// Handle functions that have a decl referencing a signature as 'this'
+		// e.g. fun Charset.binary[ s : String ] : Binary { this.maps[s] }
 		for (Decl d : fun.decls) {
 			decls.add(new Decl(d.isPrivate, d.disjoint, d.disjoint2, replaceSigRefs(d.names, inV1),
-					replaceSigRefs(d.expr, inV1)));
+					replaceSigRefs(d.expr, decls, inV1)));
 		}
 		Func fun2 = new Func(fun.pos, fun.label, decls, replaceSigRefs(fun.returnDecl, decls, inV1),
 				replaceSigRefs(fun.getBody(), decls, inV1));
 		return fun2;
 	}
 
-	private ExprVar getExprVarToSig(ExprVar ev) {
+	private ExprVar getExprVarToSig(ExprVar ev, boolean inV1) {
 		ProductType pt = ev.type().iterator().next();
 		if (pt.arity() > 1) {
 			throw new RuntimeException("Arity > 1 when resolving a \"this\" expression");
 		}
-		// FIXME this might need to look up the signature expression instead
-		Sig s = sigs.get(pt.get(0).label);
+		String sigLabel = pt.get(0).label;
+		// First try the sig expression (handles abstract sigs with subsigs
+		// that are not directly in the sigs map, e.g. when both modules have
+		// the same abstract sig with children)
+		Expr sigExpr = (inV1 ? v1SigExpr : v2SigExpr).get(sigLabel);
+		if (sigExpr != null) {
+			return ExprVar.make(ev.pos, "this", sigExpr.type());
+		}
+		// Fall back to the merged sig
+		Sig s = sigs.get(sigLabel);
 		if (s == null) {
-			s = getInternalSig(pt.get(0).label);
+			s = getInternalSig(sigLabel);
 			if (s == null) {
-				throw new RuntimeException("Signature " + pt.get(0).label + " not found in merged signature map.");
+				throw new RuntimeException("Signature " + sigLabel + " not found in merged signature map.");
 			}
 		}
 

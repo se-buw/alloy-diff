@@ -411,4 +411,107 @@ public class ModuleMergerTest {
     
         assertEquals(satisfiable, ans.satisfiable());
     }
+
+    
+    @Test
+    public void testMergeFieldCycle() throws Exception {
+        String module1 = """
+        sig A {
+            f1 : set A,
+            f2 : A - f1
+        }
+        """;
+        String module2 = """
+        sig A {
+            f2 : set A,
+            f1 : A - f2
+        }        
+        """;
+
+        String pred = "some A";
+        checkV2notV1(module1, module2, pred, true);
+    }
+
+    @Test
+    public void testMergeFieldCycleComplexType() throws Exception {
+        String module1 = """
+        sig B extends A {}
+        sig A {
+            f1 : set B,
+            f2 : A - f1
+        }
+        """;
+        String module2 = """
+        sig A {
+            f2 : set A,
+            f1 : A - f2
+        }        
+        """;
+
+        String pred = "one A";
+        checkV2notV1(module1, module2, pred, true);
+    }
+
+    /**
+     * Tests that a sig-qualified function (fun Sig.name[...]) works when the
+     * function is called from a fact. This exercises the FIXME in
+     * replaceSigRefs(Func) and getExprVarToSig.
+     */
+    @Test
+    public void testFunctionsWithSigRef() throws Exception {
+        String module1 = """
+        sig A {
+            f : set A
+        }
+        fun A.reach[] : set A {
+            this.^f
+        }
+        fact { all a: A | a not in a.reach }
+        """;
+        String module2 = """
+        sig A {
+            f : set A
+        }
+        fun A.reach[] : set A {
+            this.^f
+        }
+        fact { all a: A | a not in a.reach }
+        """;
+
+        // Identical modules → diff should be unsatisfiable
+        checkV2notV1(module1, module2, "", false);
+    }
+
+    /**
+     * Tests sig-qualified function with abstract sig + subsigs.
+     * The abstract sig with subsigs in both modules is NOT added to the merged
+     * sigs map, so getExprVarToSig must handle this case.
+     */
+    @Test
+    public void testFunctionsWithSigRefAbstract() throws Exception {
+        String module1 = """
+        abstract sig Base {}
+        sig Sub1 extends Base {
+            val : one Int
+        }
+        fun Base.getVal[] : Int {
+            this.val
+        }
+        fact { all b: Base | b.getVal > 0 }
+        """;
+        String module2 = """
+        abstract sig Base {}
+        sig Sub1 extends Base {
+            val : one Int
+        }
+        fun Base.getVal[] : Int {
+            this.val
+        }
+        fact { all b: Base | b.getVal >= 0 }
+        """;
+
+        // v2 allows val=0, v1 does not → diff should be satisfiable
+        checkV2notV1(module1, module2, "", true);
+    }
+
 }
