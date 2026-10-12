@@ -1,8 +1,13 @@
 package org.alloytools.alloy.diff;
 
+import java.util.List;
+import java.util.Set;
+
 import edu.mit.csail.sdg.alloy4.A4Reporter;
+import edu.mit.csail.sdg.alloy4.Pos;
 import edu.mit.csail.sdg.alloy4.Util;
 import edu.mit.csail.sdg.ast.Command;
+import edu.mit.csail.sdg.ast.CommandScope;
 import edu.mit.csail.sdg.ast.Expr;
 import edu.mit.csail.sdg.ast.ExprConstant;
 import edu.mit.csail.sdg.ast.Module;
@@ -47,11 +52,20 @@ public class CommandGenerator {
 		Expr c2 = null;
 
 		if (withPred && cmd1 != null && cmd2 != null) {
-			c1 = m.c1.and(m.replaceSigRefs(cmd1.formula, true));
-			c2 = m.c2.and(m.replaceSigRefs(cmd2.formula, false));
+			// Command.formula is "globalFacts and predicateBody" (see
+			// CompModule.resolveCommand), so split the facts back out to label them
+			// correctly in the explanation.
+			Expr pred1 = trackConjuncts(m.c1Constraints, cmd1.formula, true, ConstraintOrigin.COMMAND_PREDICATE,
+					Conjuncts.identitySet(Conjuncts.of(v1.getAllReachableFacts())));
+			Expr pred2 = trackConjuncts(m.c2Constraints, cmd2.formula, false, ConstraintOrigin.COMMAND_PREDICATE,
+					Conjuncts.identitySet(Conjuncts.of(v2.getAllReachableFacts())));
+			c1 = m.c1.and(pred1);
+			c2 = m.c2.and(pred2);
 		} else {
-			c1 = m.c1.and(m.replaceSigRefs(v1.getAllReachableFacts(), true));
-			c2 = m.c2.and(m.replaceSigRefs(v2.getAllReachableFacts(), false));
+			Expr facts1 = trackConjuncts(m.c1Constraints, v1.getAllReachableFacts(), true, ConstraintOrigin.FACT, null);
+			Expr facts2 = trackConjuncts(m.c2Constraints, v2.getAllReachableFacts(), false, ConstraintOrigin.FACT, null);
+			c1 = m.c1.and(facts1);
+			c2 = m.c2.and(facts2);
 		}
 
 		if (scope == -1) {
@@ -107,11 +121,14 @@ public class CommandGenerator {
 				}
 
 				int scopeInOrig = Math.min(sc1.sig2scope(parent), sc1orig.sig2scope(parent));
+				Expr scopeConstraint;
 				if (sc1orig.isExact(parent) || (cmd1 != null && cmd1.additionalExactScopes.contains(parent))) {
-					c1 = c1.and(union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
+					scopeConstraint = union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
 				} else {
-					c1 = c1.and(union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
+					scopeConstraint = union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
 				}
+				m.trackConstraint(m.c1Constraints, scopeConstraint, scopePos(cmd1, parent), ConstraintOrigin.SCOPE_BOUND);
+				c1 = c1.and(scopeConstraint);
 				maxInt = Math.max(maxInt, Math.max(ones, scopeInOrig));
 			}
 		}
@@ -140,11 +157,14 @@ public class CommandGenerator {
 				}
 
 				int scopeInOrig = Math.min(sc2.sig2scope(parent), sc2orig.sig2scope(parent));
+				Expr scopeConstraint;
 				if (sc2orig.isExact(parent) || (cmd2 != null && cmd2.additionalExactScopes.contains(parent))) {
-					c2 = c2.and(union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
+					scopeConstraint = union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
 				} else {
-					c2 = c2.and(union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig))));
+					scopeConstraint = union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
 				}
+				m.trackConstraint(m.c2Constraints, scopeConstraint, scopePos(cmd2, parent), ConstraintOrigin.SCOPE_BOUND);
+				c2 = c2.and(scopeConstraint);
 			}
 
 		}
@@ -190,19 +210,27 @@ public class CommandGenerator {
 			// explicitly embed cardinality constraints to respect model scopes
 			if (s1 != null && scope1 != -1) {
 				if (exact1) {
-					c1 = c1.and(s.cardinality().equal(ExprConstant.makeNUMBER(scope1)));
+					Expr sc = s.cardinality().equal(ExprConstant.makeNUMBER(scope1));
+					m.trackConstraint(m.c1Constraints, sc, scopePos(cmd1, s1), ConstraintOrigin.SCOPE_BOUND);
+					c1 = c1.and(sc);
 					changed = true;
 				} else if (scope2 != -1 && scope1 < scope2) {
-					c1 = c1.and(s.cardinality().lte(ExprConstant.makeNUMBER(scope1)));
+					Expr sc = s.cardinality().lte(ExprConstant.makeNUMBER(scope1));
+					m.trackConstraint(m.c1Constraints, sc, scopePos(cmd1, s1), ConstraintOrigin.SCOPE_BOUND);
+					c1 = c1.and(sc);
 					changed = true;
 				}
 			}
 			if (s2 != null && scope2 != -1) {
 				if (exact2) {
-					c2 = c2.and(s.cardinality().equal(ExprConstant.makeNUMBER(scope2)));
+					Expr sc = s.cardinality().equal(ExprConstant.makeNUMBER(scope2));
+					m.trackConstraint(m.c2Constraints, sc, scopePos(cmd2, s2), ConstraintOrigin.SCOPE_BOUND);
+					c2 = c2.and(sc);
 					changed = true;
 				} else if (scope1 != -1 && scope2 < scope1) {
-					c2 = c2.and(s.cardinality().lte(ExprConstant.makeNUMBER(scope2)));
+					Expr sc = s.cardinality().lte(ExprConstant.makeNUMBER(scope2));
+					m.trackConstraint(m.c2Constraints, sc, scopePos(cmd2, s2), ConstraintOrigin.SCOPE_BOUND);
+					c2 = c2.and(sc);
 					changed = true;
 				}
 			}
@@ -213,6 +241,55 @@ public class CommandGenerator {
 		}
 
 		return cmd;
+	}
+	/**
+	 * Splits a source expression into its top-level conjuncts, rewrites each one
+	 * over the merged signatures, tracks it for the explanation and returns the
+	 * conjunction of the rewritten conjuncts.
+	 * <p>
+	 * The split is done on the <em>original</em> expression rather than on the
+	 * rewritten one on purpose: only the original still has positions that all
+	 * point into a single source file, so each conjunct can be given the exact
+	 * source region it came from. Rewriting is compositional, so rewriting the
+	 * conjuncts one by one is equivalent to rewriting the whole conjunction.
+	 *
+	 * @param list      the constraint list to append to (c1 or c2)
+	 * @param expr      the original, un-rewritten expression
+	 * @param inV1      whether to rewrite against v1 or v2
+	 * @param origin    the origin to record for conjuncts that are not in
+	 *                  {@code factConjuncts}
+	 * @param factConjuncts conjuncts that are global facts (recorded as
+	 *                  {@link ConstraintOrigin#FACT}), or null if none
+	 */
+	private Expr trackConjuncts(List<ConstraintInfo> list, Expr expr, boolean inV1, ConstraintOrigin origin,
+			Set<Expr> factConjuncts) {
+		Expr result = null;
+		for (Expr conjunct : Conjuncts.of(expr)) {
+			ConstraintOrigin o = (factConjuncts != null && factConjuncts.contains(conjunct)) ? ConstraintOrigin.FACT
+					: origin;
+			Expr rewritten = m.replaceSigRefs(conjunct, inV1);
+			m.trackConstraint(list, rewritten, ConstraintInfo.sourcePos(conjunct), o);
+			result = (result == null) ? rewritten : result.and(rewritten);
+		}
+		return result == null ? ExprConstant.TRUE : result;
+	}
+
+	/**
+	 * The source position to blame for a scope bound on {@code s}: the explicit
+	 * scope in the command if there is one, otherwise the command itself.
+	 */
+	private static Pos scopePos(Command cmd, Sig s) {
+		if (cmd == null) {
+			return Pos.UNKNOWN;
+		}
+		if (s != null && cmd.scope != null) {
+			for (CommandScope cs : cmd.scope) {
+				if (cs.sig != null && cs.sig.label.equals(s.label)) {
+					return cs.pos != null ? cs.pos : Pos.UNKNOWN;
+				}
+			}
+		}
+		return cmd.pos == null ? Pos.UNKNOWN : cmd.pos;
 	}
 
 	private Expr getExpr(Expr c1, Expr c2, Analysis a) {

@@ -80,6 +80,15 @@ public class ModuleMerger {
 	 */
 	protected Expr c2;
 
+	/**
+	 * individual conjuncts of c1 with their origin metadata, for explanation
+	 */
+	protected List<ConstraintInfo> c1Constraints = new ArrayList<>();
+	/**
+	 * individual conjuncts of c2 with their origin metadata, for explanation
+	 */
+	protected List<ConstraintInfo> c2Constraints = new ArrayList<>();
+
 	private record ExprPair(Expr e1, Expr e2) {
 	}
 
@@ -98,6 +107,23 @@ public class ModuleMerger {
 	private String sigOverrideForField;
 
 	protected int maxInt;
+
+	/**
+	 * Tracks an individual constraint conjunct for later explanation.
+	 */
+	void trackConstraint(List<ConstraintInfo> list, Expr constraint, ConstraintOrigin origin) {
+		list.add(new ConstraintInfo(constraint, origin));
+	}
+
+	/**
+	 * Tracks an individual constraint conjunct with an explicit source position.
+	 * Used for constraints whose expression is synthesized (and therefore has no
+	 * usable position of its own) or rewritten over merged sigs (whose span may
+	 * mix positions from both files).
+	 */
+	void trackConstraint(List<ConstraintInfo> list, Expr constraint, Pos pos, ConstraintOrigin origin) {
+		list.add(new ConstraintInfo(constraint, pos, origin));
+	}
 
 	/**
 	 * Merges signatures from v1 and v2 by creating combined Sigs for common
@@ -122,6 +148,8 @@ public class ModuleMerger {
 		v2Sigs = new LinkedHashMap<>();
 		c1 = ExprConstant.TRUE;
 		c2 = ExprConstant.TRUE;
+		c1Constraints = new ArrayList<>();
+		c2Constraints = new ArrayList<>();
 		maxInt = 0;
 
 		// fill look-up tables
@@ -163,9 +191,9 @@ public class ModuleMerger {
 										: new Attr[]{});
 						}
 						sigs.put(sName, s);
-						c1 = generateSigAttributeConstraints(s, old, v1iu, c1);
+						c1 = generateSigAttributeConstraints(s, old, v1iu, c1, c1Constraints);
 						// closed world
-						c2 = c2.and(alwaysIfVar(s.no(), old.isVariable != null));
+						{ Expr cw = alwaysIfVar(s.no(), old.isVariable != null); trackConstraint(c2Constraints, cw, old.pos, ConstraintOrigin.CLOSED_WORLD); c2 = c2.and(cw); }
 					}
 				}
 			}
@@ -188,9 +216,9 @@ public class ModuleMerger {
 										: new Attr[]{});
 						}
 						sigs.put(sName, s);
-						c2 = generateSigAttributeConstraints(s, old, v2iu, c2);
+						c2 = generateSigAttributeConstraints(s, old, v2iu, c2, c2Constraints);
 						// closed world
-						c1 = c1.and(alwaysIfVar(s.no(), old.isVariable != null));
+						{ Expr cw = alwaysIfVar(s.no(), old.isVariable != null); trackConstraint(c1Constraints, cw, old.pos, ConstraintOrigin.CLOSED_WORLD); c1 = c1.and(cw); }
 					}
 				}
 			}
@@ -225,25 +253,25 @@ public class ModuleMerger {
 						notInV2.addAll(ps1);
 						notInV2.removeAll(ps2);
 						for (Sig s : notInV1) {
-							c1 = c1.and(alwaysIfVar(s.intersect(sub).no(), sub.isVariable != null));
+							{ Expr cw = alwaysIfVar(s.intersect(sub).no(), sub.isVariable != null); trackConstraint(c1Constraints, cw, ConstraintOrigin.SIG_HIERARCHY); c1 = c1.and(cw); }
 						}
 						for (Sig s : notInV2) {
-							c2 = c2.and(alwaysIfVar(s.intersect(sub).no(), sub.isVariable != null));
+							{ Expr cw = alwaysIfVar(s.intersect(sub).no(), sub.isVariable != null); trackConstraint(c2Constraints, cw, ConstraintOrigin.SIG_HIERARCHY); c2 = c2.and(cw); }
 						}
-						c1 = generateSigAttributeConstraints(sub, s1, v1iu, c1);
+						c1 = generateSigAttributeConstraints(sub, s1, v1iu, c1, c1Constraints);
 						
 						for (Attr attr : s1.attributes) {
 						if (attr != null && attr.type == Attr.AttrType.EXACT) {
 								// make sub equal to ps1 union (sigs in v1)
-								c1 = c1.and(alwaysIfVar(sub.equal(makePlus(ps1)), sub.isVariable != null));
+								{ Expr cw = alwaysIfVar(sub.equal(makePlus(ps1)), sub.isVariable != null); trackConstraint(c1Constraints, cw, ConstraintOrigin.SIG_HIERARCHY); c1 = c1.and(cw); }
 							}
 						}
 						
-						c2 = generateSigAttributeConstraints(sub, s2, v2iu, c2);
+						c2 = generateSigAttributeConstraints(sub, s2, v2iu, c2, c2Constraints);
 						for (Attr attr : s2.attributes) {
 						if (attr != null && attr.type == Attr.AttrType.EXACT) {
 								// make sub equal to ps1 union (sigs in v1)
-								c2 = c2.and(alwaysIfVar(sub.equal(makePlus(ps2)), sub.isVariable != null));
+								{ Expr cw = alwaysIfVar(sub.equal(makePlus(ps2)), sub.isVariable != null); trackConstraint(c2Constraints, cw, ConstraintOrigin.SIG_HIERARCHY); c2 = c2.and(cw); }
 							}
 						}
 					} else {
@@ -251,7 +279,7 @@ public class ModuleMerger {
 					}
 				} else {
 					// SubSetSig is unique in v1, add it and suppress in v2
-					ExprPair cs = addUniqueSubsetSig(s1, ps1, c1, c2);
+					ExprPair cs = addUniqueSubsetSig(s1, ps1, c1, c2, c1Constraints, c2Constraints);
 					c1 = cs.e1();
 					c2 = cs.e2();
 				}
@@ -262,7 +290,7 @@ public class ModuleMerger {
 			if (s2 instanceof SubsetSig) {
 				if (sigs.get(s2.label) == null) { // we have not handled it in the above cases, i.e., it is unique in v2
 					Set<Sig> ps2 = parents((SubsetSig) s2);
-					ExprPair cs = addUniqueSubsetSig(s2, ps2, c2, c1);
+					ExprPair cs = addUniqueSubsetSig(s2, ps2, c2, c1, c2Constraints, c1Constraints);
 					c2 = cs.e1();
 					c1 = cs.e2();
 				} else if (sigs.get(s2.label) instanceof PrimSig) {
@@ -273,8 +301,8 @@ public class ModuleMerger {
 
 		// add containment of SubsetSigs in hierarchy (removed above as it could be contradicting in the two versions):
 		// for sig A in B + C ... {} add c1/c2 A in B + C
-		c1 = restoreSubSetSigHierarchy(v1Sigs, c1);
-		c2 = restoreSubSetSigHierarchy(v2Sigs, c2);
+		c1 = restoreSubSetSigHierarchy(v1Sigs, c1, c1Constraints);
+		c2 = restoreSubSetSigHierarchy(v2Sigs, c2, c2Constraints);
 	
 
 		// add fields to merged signatures
@@ -304,7 +332,7 @@ public class ModuleMerger {
 		return sigs.values();
 	}
 
-	private Expr restoreSubSetSigHierarchy(Map<String, Sig> oldSigs, Expr cOld) {
+	private Expr restoreSubSetSigHierarchy(Map<String, Sig> oldSigs, Expr cOld, List<ConstraintInfo> constraints) {
 		for (Sig s : oldSigs.values()) {
 			if (s instanceof SubsetSig) {
 				SubsetSig sub = (SubsetSig) s;
@@ -315,14 +343,16 @@ public class ModuleMerger {
 				}
 				if (parentUnion != null) {
 					Sig c = sigs.get(sub.label);
-					cOld = cOld.and(alwaysIfVar(c.in(parentUnion), c.isVariable != null));
+					Expr constraint = alwaysIfVar(c.in(parentUnion), c.isVariable != null);
+					trackConstraint(constraints, constraint, ConstraintOrigin.SIG_HIERARCHY);
+					cOld = cOld.and(constraint);
 				}
 			}
 		}
 		return cOld;
 	}
 
-	private ExprPair addUniqueSubsetSig(Sig oldSig, Set<Sig> newParents, Expr c1, Expr c2) {
+	private ExprPair addUniqueSubsetSig(Sig oldSig, Set<Sig> newParents, Expr c1, Expr c2, List<ConstraintInfo> ownerConstraints, List<ConstraintInfo> otherConstraints) {
 		List<Attr> attrs = new ArrayList<>();
 		if (oldSig.isVariable != null) {
 			attrs.add(Attr.VARIABLE);
@@ -341,21 +371,29 @@ public class ModuleMerger {
 
 		if (oldSig.isSome != null) {
 			// if the sig is some then it must be some in the merged module
-			c1 = c1.and(alwaysIfVar(subV1.some(), subV1.isVariable != null));
+			Expr constraint = alwaysIfVar(subV1.some(), subV1.isVariable != null);
+			trackConstraint(ownerConstraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+			c1 = c1.and(constraint);
 		}
 		if (oldSig.isOne != null) {
 			// if the sig is one then it must be one in the merged module
-			c1 = c1.and(alwaysIfVar(subV1.one(), subV1.isVariable != null));
+			Expr constraint = alwaysIfVar(subV1.one(), subV1.isVariable != null);
+			trackConstraint(ownerConstraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+			c1 = c1.and(constraint);
 		}
 		// EXACT is not added to unique SubsetSigs, but enforced here
 		for (Attr attr : oldSig.attributes) {
 			if (attr != null && attr.type == Attr.AttrType.EXACT) {
 				// make sub equal to ps1 union (sigs in v1)
-				c1 = c1.and(alwaysIfVar(subV1.equal(makePlus(newParents)), subV1.isVariable != null));
+				Expr constraint = alwaysIfVar(subV1.equal(makePlus(newParents)), subV1.isVariable != null);
+				trackConstraint(ownerConstraints, constraint, ConstraintOrigin.SIG_HIERARCHY);
+				c1 = c1.and(constraint);
 			}
 		}
 		
-		c2 = c2.and(alwaysIfVar(subV1.no(), subV1.isVariable != null));
+		Expr cwConstraint = alwaysIfVar(subV1.no(), subV1.isVariable != null);
+		trackConstraint(otherConstraints, cwConstraint, ConstraintOrigin.CLOSED_WORLD);
+		c2 = c2.and(cwConstraint);
 		return new ExprPair(c1, c2);
 	}
 
@@ -416,15 +454,23 @@ public class ModuleMerger {
 				if (os.label.endsWith("/Ord")) {
 					inSigFactOfOrd = true;
 				}
-				Expr body = replaceSigRefs(of, decls, inV1);
+				// a signature fact block is an implicit conjunction; quantification
+				// distributes over it, so each constraint in the block becomes its own
+				// conjunct and keeps its own source position
+				for (Expr conjunct : Conjuncts.of(of)) {
+					Expr body = replaceSigRefs(conjunct, decls, inV1);
+					Expr sigFact = ExprQt.Op.ALL.make(of.pos, of.closingBracket, decls, body);
+					Pos pos = ConstraintInfo.sourcePos(conjunct);
+					if (inV1) {
+						trackConstraint(c1Constraints, sigFact, pos, ConstraintOrigin.SIG_FACT);
+						c1 = c1.and(sigFact);
+					} else {
+						trackConstraint(c2Constraints, sigFact, pos, ConstraintOrigin.SIG_FACT);
+						c2 = c2.and(sigFact);
+					}
+				}
 				if (os.label.endsWith("/Ord")) {
 					inSigFactOfOrd = false;
-				}
-				Expr sigFact = ExprQt.Op.ALL.make(of.pos, of.closingBracket, decls, body);
-				if (inV1) {
-					c1 = c1.and(sigFact);
-				} else {
-					c2 = c2.and(sigFact);
 				}
 			}
 		}
@@ -514,8 +560,8 @@ public class ModuleMerger {
 	 */
 	private Sig mergeSig(Sig s1, Sig s2) {
 		Sig s = new PrimSig(s1.label, getMergedSigAttributes(s1, s2));
-		c1 = generateSigAttributeConstraints(s, s1, v1iu, c1);
-		c2 = generateSigAttributeConstraints(s, s2, v2iu, c2);
+		c1 = generateSigAttributeConstraints(s, s1, v1iu, c1, c1Constraints);
+		c2 = generateSigAttributeConstraints(s, s2, v2iu, c2, c2Constraints);
 
 		return s;
 	}
@@ -664,15 +710,15 @@ public class ModuleMerger {
 				Expr e1mult = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), quantBody1);
 				Expr e2mult = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), quantBody2);
 
-				c1 = c1.and(alwaysIfVar(e1mult, f1.isVariable != null));
+				{ Expr fc = alwaysIfVar(e1mult, f1.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 				if (f1.isVariable == null && f.isVariable != null) {
 					// Must quantify over all atosm- all this: Sig | always (this.f' = this.f)
-					c1 = c1.and(ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
+					{ Expr fc = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_FRAME); c1 = c1.and(fc); }
 				}
-				c2 = c2.and(alwaysIfVar(e2mult, f2.isVariable != null));
+				{ Expr fc = alwaysIfVar(e2mult, f2.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 				if (f2.isVariable == null && f.isVariable != null) {
 					// Expr frameBody2 = ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)));
-					c2 = c2.and(ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
+					{ Expr fc = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_FRAME); c2 = c2.and(fc); }
 				}
 			} else if (f1.decl().expr instanceof ExprBinary && f2.decl().expr instanceof ExprBinary) { // relational
 																										// fields
@@ -702,14 +748,14 @@ public class ModuleMerger {
 				Expr e1mult = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), quantBody1);
 				Expr e2mult = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), quantBody2);
 
-				c1 = c1.and(alwaysIfVar(e1mult, f1.isVariable != null));
+				{ Expr fc = alwaysIfVar(e1mult, f1.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 				if (f1.isVariable == null && f.isVariable != null) {
 					// Must quantify over all atosm- all this: Sig | always (this.f' = this.f)
-					c1 = c1.and(ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
+					{ Expr fc = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_FRAME); c1 = c1.and(fc); }
 				}
-				c2 = c2.and(alwaysIfVar(e2mult, f2.isVariable != null));
+				{ Expr fc = alwaysIfVar(e2mult, f2.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 				if (f2.isVariable == null && f.isVariable != null) {
-					c2 = c2.and(ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))));
+					{ Expr fc = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_FRAME); c2 = c2.and(fc); }
 				}
 			} else {
 				throw new RuntimeException("Mix of field arities " + f1.pos);
@@ -759,14 +805,14 @@ public class ModuleMerger {
 									quantBody1 = ExprITE.make(f.pos, ths.get().in(sigs.get(f.sig.label)),
 											quantBody1, ths.get().join(merged).no());
 									Expr e1mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody1);
-									c1 = c1.and(alwaysIfVar(e1mult, f.isVariable != null));
+									{ Expr fc = alwaysIfVar(e1mult, f.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 								} else {
 									Decl ths = s.decl;
 									Expr quantBody2 = ths.get().join(merged).in(origBound);
 									quantBody2 = ExprITE.make(f.pos, ths.get().in(sigs.get(f.sig.label)),
 											quantBody2, ths.get().join(merged).no());
 									Expr e2mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody2);
-									c2 = c2.and(alwaysIfVar(e2mult, f.isVariable != null));
+									{ Expr fc = alwaysIfVar(e2mult, f.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 								}
 							} else {
 								// case 2: add relational field as is (it cannot have a multiplicity) 
@@ -777,13 +823,13 @@ public class ModuleMerger {
 									Expr quantBody1 = ths.get().in(sigs.get(f.sig.label))
 											.or(ths.get().join(merged).no());
 									Expr e1mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody1);
-									c1 = c1.and(alwaysIfVar(e1mult, f.isVariable != null));
+									{ Expr fc = alwaysIfVar(e1mult, f.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 								} else {
 									Decl ths = s.decl;
 									Expr quantBody2 = ths.get().in(sigs.get(f.sig.label))
 											.or(ths.get().join(merged).no());
 									Expr e2mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody2);
-									c2 = c2.and(alwaysIfVar(e2mult, f.isVariable != null));
+									{ Expr fc = alwaysIfVar(e2mult, f.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 								}
 							}
 						} else {
@@ -834,11 +880,11 @@ public class ModuleMerger {
 							ths.get().join(f).no());
 				}
 				Expr e1mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-				c1 = c1.and(alwaysIfVar(e1mult, field.isVariable != null));
+				{ Expr fc = alwaysIfVar(e1mult, field.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 
-				c2 = c2.and(alwaysIfVar(f.decl().get().no(), field.isVariable != null));
+				{ Expr fc = alwaysIfVar(f.decl().get().no(), field.isVariable != null); trackConstraint(c2Constraints, fc, field.pos, ConstraintOrigin.CLOSED_WORLD); c2 = c2.and(fc); }
 			} else {
-				c1 = c1.and(alwaysIfVar(f.decl().get().no(), field.isVariable != null));
+				{ Expr fc = alwaysIfVar(f.decl().get().no(), field.isVariable != null); trackConstraint(c1Constraints, fc, field.pos, ConstraintOrigin.CLOSED_WORLD); c1 = c1.and(fc); }
 
 				Expr quantBody = ths.get().join(f).in(e);
 				// restriction of fields from SubsetSigs
@@ -848,7 +894,7 @@ public class ModuleMerger {
 				}
 
 				Expr e2mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-				c2 = c2.and(alwaysIfVar(e2mult, field.isVariable != null));
+				{ Expr fc = alwaysIfVar(e2mult, field.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 			}
 		} else if (e instanceof ExprBinary) {
 			f = mergedSig.addField(field.label, e, field.isVariable);
@@ -858,19 +904,19 @@ public class ModuleMerger {
 					// make empty if not in SubsetSig
 					Expr quantBody = ths.get().in(sigs.get(field.sig.label)).or(ths.get().join(f).no());
 					Expr e1mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-					c1 = c1.and(alwaysIfVar(e1mult, field.isVariable != null));
+					{ Expr fc = alwaysIfVar(e1mult, field.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 				}
-				c2 = c2.and(alwaysIfVar(f.decl().get().no(), field.isVariable != null));
+				{ Expr fc = alwaysIfVar(f.decl().get().no(), field.isVariable != null); trackConstraint(c2Constraints, fc, field.pos, ConstraintOrigin.CLOSED_WORLD); c2 = c2.and(fc); }
 			} else {
 				if (v2iu.getFieldsFromSubsetSig().contains(field)) {
 					Decl ths = mergedSig.decl;
 					// make empty if not in SubsetSig
 					Expr quantBody = ths.get().in(sigs.get(field.sig.label)).or(ths.get().join(f).no());
 					Expr e2mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-					c2 = c2.and(alwaysIfVar(e2mult, field.isVariable != null));
+					{ Expr fc = alwaysIfVar(e2mult, field.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 				}
 
-				c1 = c1.and(alwaysIfVar(f.decl().get().no(), field.isVariable != null));
+				{ Expr fc = alwaysIfVar(f.decl().get().no(), field.isVariable != null); trackConstraint(c1Constraints, fc, field.pos, ConstraintOrigin.CLOSED_WORLD); c1 = c1.and(fc); }
 			}
 		}
 	}
@@ -1257,30 +1303,40 @@ public class ModuleMerger {
 
 
 
-	private Expr generateSigAttributeConstraints(Sig s, Sig old, InheritanceUtil iu, Expr c) {
+	private Expr generateSigAttributeConstraints(Sig s, Sig old, InheritanceUtil iu, Expr c, List<ConstraintInfo> constraints) {
 		boolean isVar = (s.isVariable != null); // if merged sig is var (likely old was not) then constraints of old need to be wrapped in always
 		if (old.isAbstract != null && s.isAbstract == null) {
 			// without inheritance, abstract has no impact
 			if (iu.getSubSigs(old) != null) {
-				c = c.and(alwaysIfVar(s.no(), isVar));
+				Expr constraint = alwaysIfVar(s.no(), isVar);
+				trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+				c = c.and(constraint);
 			}
 		}
 
 		if (old.isLone != null && s.isLone == null) {
-			c = c.and(alwaysIfVar(s.lone(), isVar));
+			Expr constraint = alwaysIfVar(s.lone(), isVar);
+			trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+			c = c.and(constraint);
 		}
 
 		if (old.isOne != null && s.isOne == null) {
-			c = c.and(alwaysIfVar(s.one(), isVar));
+			Expr constraint = alwaysIfVar(s.one(), isVar);
+			trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+			c = c.and(constraint);
 		}
 
 		if (old.isSome != null && s.isSome == null) {
-			c = c.and(alwaysIfVar(s.some(), isVar));
+			Expr constraint = alwaysIfVar(s.some(), isVar);
+			trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+			c = c.and(constraint);
 		}
 
 		// check if merged one is var and old was not, then we need to add a constraint that the value of the signature does not change over time
 		if (old.isVariable == null && isVar) {
-			c = c.and(ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, s.prime(), s)));
+			Expr constraint = ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, s.prime(), s));
+			trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+			c = c.and(constraint);
 		}
 
 		return c;
@@ -1323,6 +1379,14 @@ public class ModuleMerger {
 			}
 		}
 		return false;
+	}
+
+	public List<ConstraintInfo> getC1Constraints() {
+		return c1Constraints;
+	}
+
+	public List<ConstraintInfo> getC2Constraints() {
+		return c2Constraints;
 	}
 
 }

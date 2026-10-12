@@ -23,6 +23,18 @@ public class ModuleDiff {
 	
 	public static int totalVarsSAT = 0;
 
+	/**
+	 * The ModuleMerger from the most recent diff, for accessing constraint info.
+	 */
+	private static ModuleMerger lastMerger = null;
+
+	/**
+	 * Returns the ModuleMerger from the most recent diff call.
+	 */
+	public static ModuleMerger getLastMerger() {
+		return lastMerger;
+	}
+
 	public static void main(String[] args) {
 		if (args.length < 2) {
 			System.out.println("Usage: ModuleDiff <leftFile> <rightFile> [analysis:SemDiff|CommonInst|Equivalence] [scope] [withPred] [solver:sat4j|cryptoMinisat|minisat]");
@@ -232,6 +244,7 @@ public class ModuleDiff {
 
 		ModuleMerger m = new ModuleMerger();
 		Collection<Sig> sigs = m.mergeSigs(v1, v2);
+		lastMerger = m;
 
 		CommandGenerator cg = new CommandGenerator(m);
 		Command diffCommand = cg.generateDiffCommand(v1, v2, cmdIndex1, cmdIndex2, scope, withPred, a);			

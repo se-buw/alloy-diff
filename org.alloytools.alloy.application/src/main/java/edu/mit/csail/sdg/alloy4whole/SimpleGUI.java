@@ -209,6 +209,9 @@ public final class SimpleGUI implements ComponentListener, Listener {
 
     final static Pattern TYPED_P = Pattern.compile("([A-Za-z]{3,6}):");
 
+    /** doVisualize() argument that just clears the source-code highlighting. */
+    final static String  CLEAR_SHADING = "SHADE: clear";
+
     /**
      * The latest welcome screen; each time we update the welcome screen, we
      * increment this number.
@@ -1682,6 +1685,11 @@ public final class SimpleGUI implements ComponentListener, Listener {
     Runner doVisualize(String arg) {
         if (wrap)
             return wrapMe(arg);
+
+        if (CLEAR_SHADING.equals(arg)) { // remove highlighting without showing anything
+            text.clearShade();
+            return null;
+        }
 
         if (!TYPED_P.matcher(arg).lookingAt()) {
             arg = "XML: " + arg;

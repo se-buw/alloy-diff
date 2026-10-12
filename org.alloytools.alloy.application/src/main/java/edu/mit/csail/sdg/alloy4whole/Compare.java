@@ -2,17 +2,23 @@ package edu.mit.csail.sdg.alloy4whole;
 
 import java.io.File;
 import java.io.IOException;
+import java.util.List;
 
 import org.alloytools.alloy.diff.Analysis;
+import org.alloytools.alloy.diff.ConstraintInfo;
+import org.alloytools.alloy.diff.ConstraintOrigin;
+import org.alloytools.alloy.diff.DiffExplanation;
 import org.alloytools.alloy.diff.ModuleDiff;
+import org.alloytools.alloy.diff.ModuleMerger;
 
 import edu.mit.csail.sdg.alloy4.Computer;
 import edu.mit.csail.sdg.alloy4.OurDialog;
+import edu.mit.csail.sdg.alloy4.Pos;
 import edu.mit.csail.sdg.alloy4viz.VizGUI;
 import edu.mit.csail.sdg.translator.A4Solution;
 
 public class Compare {
-	
+
 	static {
 		try {
 			ALLOY_EXAMPLE_OUTPUT_XML = File.createTempFile("alloyInst", ".xml").getAbsolutePath();
@@ -24,6 +30,19 @@ public class Compare {
 	private static String ALLOY_EXAMPLE_OUTPUT_XML;
 	public static A4Solution ans;
 	public static VizGUI viz;
+	/**
+	 * The merger of the comparison currently being shown. Captured when the
+	 * comparison runs rather than read from ModuleDiff at logging time, so that
+	 * enumerating instances of an older comparison cannot pick up the constraints
+	 * of a newer one.
+	 */
+	private static ModuleMerger merger;
+	/** The analysis the current comparison was started with. */
+	private static Analysis lastAnalysis;
+	/** 1-based index of the witness currently shown, for labelling the log. */
+	private static int instanceIndex;
+	/** The explanation of the witness currently shown, if any. */
+	private static DiffExplanation.Explanation lastExplanation;
 
 	public static void CompareModules(String leftFile, String rightFile, int leftCmdIndex, int rightCmdIndex, String analysis, SwingLogPanel log) {
 		if (log != null) {
@@ -32,18 +51,30 @@ public class Compare {
 
 			log.logBold("Comparing: " + new File(leftFile).getName() + " with " + new File(rightFile).getName());
 		}
+		merger = null;
+		lastExplanation = null;
+		instanceIndex = 1;
 		switch (analysis) {
 		case "Semantic Diff":
+			// ModuleDiff.diff(v1=rightFile, v2=leftFile) computes c2.and(c1.not())
+			// i.e. instances of leftFile that are NOT instances of rightFile
+			lastAnalysis = Analysis.SemDiff;
 			ans = ModuleDiff.diff(rightFile, leftFile, rightCmdIndex, leftCmdIndex, -1, true, Analysis.SemDiff);
+			merger = ModuleDiff.getLastMerger();
 			break;
 		case "Common Instances":
+			lastAnalysis = Analysis.CommonInst;
 			ans = ModuleDiff.diff(rightFile, leftFile, rightCmdIndex, leftCmdIndex, -1, true, Analysis.CommonInst);
+			merger = ModuleDiff.getLastMerger();
 			break;
 		case "Equivalence":
+			lastAnalysis = Analysis.Equivalence;
 			ans = ModuleDiff.diff(rightFile, leftFile, rightCmdIndex, leftCmdIndex, -1, true, Analysis.Equivalence);
+			merger = ModuleDiff.getLastMerger();
 			if (ans.satisfiable()) {
 				if (log != null) {
 					log.logRed("\nNot equivalent.\n Counter-example found. Visualizer opened.\n");
+					logExplanation(log);
 				}
 			} else {
 				if (log != null) {
@@ -52,14 +83,16 @@ public class Compare {
 			}
 			log.flush();
 			showViz(log);
-			return;				
+			return;
 		default:
+			lastAnalysis = null;
 			break;
 		}
 
 		if (ans.satisfiable()) {
 			if (log != null) {
 				log.log("\nInstance Found. Visualizer opened.\n");
+				logExplanation(log);
 			} else {
 				System.out.println(ans);
 			}
@@ -73,6 +106,113 @@ public class Compare {
 
 		log.flush();
 		showViz(log);
+	}
+
+	/**
+	 * Logs the constraints violated by the witness currently in {@link #ans} as
+	 * clickable links. Clicking a link highlights the corresponding conjunct in
+	 * the editor.
+	 *
+	 * <p>
+	 * An explanation only holds for the witness it was computed from: the diff
+	 * command merely asserts that <em>some</em> conjunct of the rejecting side is
+	 * false, and the next instance may falsify a different one. It is therefore
+	 * recomputed for every witness, labelled with the instance number, and any
+	 * highlighting left over from the previous instance is removed.
+	 *
+	 * <p>
+	 * For SemDiff (c2 &and; &not;c1): the witness satisfies c2 but violates c1.
+	 * c1 = rightFile constraints (v1), c2 = leftFile constraints (v2). Violated
+	 * c1 constraints explain WHY the witness is not valid in rightFile.
+	 *
+	 * <p>
+	 * For Equivalence (&not;(c1 &harr; c2)): the witness satisfies one side but
+	 * not the other, so violations from both sides are reported.
+	 */
+	private static void logExplanation(SwingLogPanel log) {
+		lastExplanation = null;
+		if (merger == null || lastAnalysis == null || ans == null || !ans.satisfiable()) {
+			return;
+		}
+		if (lastAnalysis == Analysis.CommonInst) {
+			// both sides are satisfied, there is nothing to explain
+			return;
+		}
+
+		// the previous instance's highlighting no longer explains anything
+		log.clearShading();
+
+		DiffExplanation.Explanation explanation = DiffExplanation.explain(ans, merger, lastAnalysis);
+		lastExplanation = explanation;
+
+		if (lastAnalysis == Analysis.SemDiff) {
+			logViolatedConstraints(log, explanation.violatedC1(),
+					"Instance #" + instanceIndex + " — violated constraints (why this instance is rejected):");
+		} else {
+			logViolatedConstraints(log, explanation.violatedC1(),
+					"Instance #" + instanceIndex + " — violated in right model:");
+			logViolatedConstraints(log, explanation.violatedC2(),
+					"Instance #" + instanceIndex + " — violated in left model:");
+		}
+
+		if (!explanation.isComplete()) {
+			log.logRed("  No violated constraint found for this instance — the explanation is incomplete.\n");
+		}
+	}
+
+	/**
+	 * Returns the explanation of the witness currently shown, or null if there is
+	 * none. The caller should check {@link DiffExplanation.Explanation#isFor} to
+	 * make sure it still refers to the witness of interest.
+	 */
+	public static DiffExplanation.Explanation getLastExplanation() {
+		return lastExplanation;
+	}
+
+	/**
+	 * Outputs a list of violated constraints as clickable links.
+	 */
+	private static void logViolatedConstraints(SwingLogPanel log, List<ConstraintInfo> violated, String header) {
+		if (violated.isEmpty()) return;
+
+		log.logBold("\n" + header + "\n");
+		for (ConstraintInfo ci : violated) {
+			Pos p = ci.pos();
+			String originLabel = formatOrigin(ci.origin());
+			int state = DiffExplanation.firstViolatingState(ans, ci);
+			String when = state < 0 ? "" : " [first fails in state " + state + "]";
+			if (ci.hasSourcePos()) {
+				String snippet = DiffExplanation.sourceText(p, ModuleDiff.sources);
+				String linkText = "  " + originLabel + " — " + new File(p.filename).getName() + " (line " + p.y + ")"
+						+ (snippet.isEmpty() ? "" : ":  " + abbreviate(snippet)) + when + "\n";
+				String linkDest = "POS: " + p.x + " " + p.y + " " + p.x2 + " " + p.y2 + " " + p.filename;
+				log.logLink(linkText, linkDest);
+			} else {
+				log.log("  " + originLabel + " (synthesized, no source position)\n");
+			}
+		}
+	}
+
+	private static String abbreviate(String s) {
+		return s.length() <= 120 ? s : s.substring(0, 117) + "...";
+	}
+
+	/**
+	 * Formats a ConstraintOrigin enum value into a human-readable label.
+	 */
+	private static String formatOrigin(ConstraintOrigin origin) {
+		switch (origin) {
+		case SIG_ATTRIBUTE:      return "Sig attribute";
+		case SIG_HIERARCHY:      return "Sig hierarchy";
+		case FIELD_MULTIPLICITY: return "Field multiplicity";
+		case FIELD_FRAME:        return "Field frame condition";
+		case SIG_FACT:           return "Sig fact";
+		case CLOSED_WORLD:       return "Closed-world assumption";
+		case FACT:               return "Fact";
+		case COMMAND_PREDICATE:  return "Command predicate";
+		case SCOPE_BOUND:        return "Scope bound";
+		default:                 return origin.name();
+		}
 	}
 
 	private static void showViz(SwingLogPanel log) {
@@ -104,10 +244,13 @@ public class Compare {
 						A4Solution nextAns = Compare.ans.fork(index);
 						if (nextAns.satisfiable()) {
 							Compare.ans = nextAns;
+							Compare.instanceIndex++;
 							writeSolutionXML(Compare.ans, ALLOY_EXAMPLE_OUTPUT_XML);
 							viz.loadXML(ALLOY_EXAMPLE_OUTPUT_XML, true);
 							if (log != null) {
-								// log.log("Next solution displayed.\r\n");
+								log.logDivider();
+								log.log("Next instance found.\n");
+								logExplanation(log);
 								log.flush();
 							}
 						} else {

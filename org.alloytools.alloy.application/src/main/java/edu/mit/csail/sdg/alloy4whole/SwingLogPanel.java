@@ -244,6 +244,15 @@ final class SwingLogPanel {
         lastSize = doc.getLength();
     }
 
+    /**
+     * Removes any source-code highlighting from the editor, e.g. because the
+     * explanation that produced it no longer applies to the instance on screen.
+     */
+    public void clearShading() {
+        if (handler != null)
+            handler.doVisualize(SimpleGUI.CLEAR_SHADING);
+    }
+
     /** Write a clickable link into the log window. */
     public void logLink(final String link, final String linkDestination) {
         if (log == null || link.length() == 0)
