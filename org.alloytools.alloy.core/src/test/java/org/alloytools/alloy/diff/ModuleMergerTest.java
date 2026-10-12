@@ -3,9 +3,7 @@ package org.alloytools.alloy.diff;
 
 import static org.junit.Assert.assertEquals;
 import static org.junit.Assert.assertTrue;
-import static org.junit.Assert.fail;
 
-import java.io.IOException;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
@@ -20,7 +18,6 @@ import org.junit.Test;
 import edu.mit.csail.sdg.alloy4.A4Reporter;
 import edu.mit.csail.sdg.alloy4.ErrorWarning;
 import edu.mit.csail.sdg.ast.Command;
-import edu.mit.csail.sdg.ast.Expr;
 import edu.mit.csail.sdg.ast.Module;
 import edu.mit.csail.sdg.ast.Sig;
 import edu.mit.csail.sdg.parser.CompUtil;
@@ -118,15 +115,6 @@ public class ModuleMergerTest {
         return fieldCount;
     }
 
-    /**
-     * tests if two modules signature counts have changed when they are not supposed
-     * to change Ex. If both modules have signature names that do not match then,
-     * then the merged module should have all signatures
-     */
-    @Test
-    public void selfMergeSigCountTest() throws Exception {
-        Files.find(Paths.get("src/test/resources/misc"), Integer.MAX_VALUE, (filePath, fileAttr) -> fileAttr.isRegularFile() && filePath.toString().endsWith(".als")).forEach(f -> selfMergeSigCount(f));
-    }
 
     private void selfMergeSigCount(Path f) {
         String fName = f.toString();
@@ -140,10 +128,6 @@ public class ModuleMergerTest {
         assertEquals(sigNum, sigs.size());
     }
 
-    @Test
-    public void selfMergeWithEmptySigCountTest() throws Exception {
-        Files.find(Paths.get("src/test/resources/misc"), Integer.MAX_VALUE, (filePath, fileAttr) -> fileAttr.isRegularFile() && filePath.toString().endsWith(".als")).forEach(f -> selfMergeWithEmptySigCount(f));
-    }
 
     public void selfMergeWithEmptySigCount(Path f) {
         String fName = f.toString();
@@ -190,17 +174,6 @@ public class ModuleMergerTest {
         assertEquals(sigNum + 1, sigs.size());
     }
 
-    @Test
-    public void mergeSigNamesTest() throws Exception {
-        Files.find(Paths.get("src/test/resources/misc"), Integer.MAX_VALUE, (filePath, fileAttr) -> fileAttr.isRegularFile() && filePath.toString().endsWith(".als")).forEach(p1 -> {
-            try {
-                Files.find(Paths.get("src/test/resources/misc"), Integer.MAX_VALUE, (filePath, fileAttr) -> fileAttr.isRegularFile() && filePath.toString().endsWith(".als")).forEach(p2 -> mergeSigNames(p1, p2));
-            } catch (IOException e) {
-                e.printStackTrace();
-                fail();
-            }
-        });
-    }
 
     private void mergeSigNames(Path p1, Path p2) {
         Module v1 = CompUtil.parseEverything_fromFile(rep, null, p1.toString());
@@ -222,18 +195,6 @@ public class ModuleMergerTest {
         return names;
     }
 
-
-    @Test
-    public void mergeFieldNamesTest() throws Exception {
-        Files.find(Paths.get("src/test/resources/misc"), Integer.MAX_VALUE, (filePath, fileAttr) -> fileAttr.isRegularFile() && filePath.toString().endsWith(".als")).forEach(p1 -> {
-            try {
-                Files.find(Paths.get("src/test/resources/misc"), Integer.MAX_VALUE, (filePath, fileAttr) -> fileAttr.isRegularFile() && filePath.toString().endsWith(".als")).forEach(p2 -> mergeFieldNames(p1, p2));
-            } catch (IOException e) {
-                e.printStackTrace();
-                fail();
-            }
-        });
-    }
 
     private void mergeFieldNames(Path p1, Path p2) {
         Module v1 = CompUtil.parseEverything_fromFile(rep, null, p1.toString());
@@ -512,6 +473,469 @@ public class ModuleMergerTest {
 
         // v2 allows val=0, v1 does not → diff should be satisfiable
         checkV2notV1(module1, module2, "", true);
+    }
+
+    private static boolean solve(String module1, String module2, Analysis a, boolean withPred) {
+        Module v1 = CompUtil.parseEverything_fromString(rep, module1);
+        Module v2 = CompUtil.parseEverything_fromString(rep, module2);
+        ModuleMerger merger = new ModuleMerger();
+        Collection<Sig> mergedSigs = merger.mergeSigs(v1, v2);
+        Command cmd = new CommandGenerator(merger).generateDiffCommand(v1, v2, 3, withPred, a);
+        A4Solution ans = TranslateAlloyToKodkod.execute_command(rep, mergedSigs, cmd, new A4Options());
+        return ans.satisfiable();
+    }
+
+    private static boolean solve(String module1, String module2, Analysis a, int scope, boolean withPred) {
+        Module v1 = CompUtil.parseEverything_fromString(rep, module1);
+        Module v2 = CompUtil.parseEverything_fromString(rep, module2);
+        ModuleMerger merger = new ModuleMerger();
+        Collection<Sig> mergedSigs = merger.mergeSigs(v1, v2);
+        Command cmd = new CommandGenerator(merger).generateDiffCommand(v1, v2, scope, withPred, a);
+        A4Solution ans = TranslateAlloyToKodkod.execute_command(rep, mergedSigs, cmd, new A4Options());
+        return ans.satisfiable();
+    }
+
+    private static void check(String module1, String module2, Analysis a, boolean withPred, boolean expectSat) {
+        assertEquals(expectSat, solve(module1, module2, a, withPred));
+    }
+
+
+    /** S in A must allow atoms of B extends A (merged sigs are flat). */
+    @Test
+    public void subsetSigContainsAtomsOfParentsSubSigs() {
+        String m = """
+                sig A {}
+                sig B extends A {}
+                sig S in A {}
+                fact { some S & B }
+                """;
+        // the model has instances (plain Alloy: SAT)
+        check(m, m, Analysis.CommonInst, false, true);
+        check(m, m, Analysis.Equivalence, false, false);
+    }
+
+    /** same through a chain of SubsetSigs. */
+    @Test
+    public void subsetSigChainContainsAtomsOfParentsSubSigs() {
+        String m = """
+                sig A {}
+                sig B extends A {}
+                sig C in A {}
+                sig D in C {}
+                fact { some D & B }
+                """;
+        check(m, m, Analysis.CommonInst, false, true);
+    }
+
+    /** a SubsetSig unique to v2 must include the sub-sigs of its parent. */
+    @Test
+    public void uniqueSubsetSigOfV2ContainsAtomsOfParentsSubSigs() {
+        String m1 = """
+                sig A {}
+                sig B extends A {}
+                """;
+        String m2 = """
+                sig A {}
+                sig B extends A {}
+                sig S in A {}
+                fact { some S & B }
+                """;
+        // every instance of m2 has some S, which m1 does not have
+        check(m1, m2, Analysis.SemDiff, false, true);
+    }
+
+    /** a model must be equivalent to itself (tube.als pattern). */
+    @Test
+    public void selfEquivalenceWithSubsetSigOverAbstractParent() {
+        String m = """
+                abstract sig Station {}
+                sig Line in Station {}
+                one sig S1, S2, S3 extends Station {}
+                """;
+        check(m, m, Analysis.Equivalence, false, false);
+    }
+
+    /** "some sig A" is satisfied by atoms of B extends A. */
+    @Test
+    public void someParentSatisfiedBySubSigAtoms() {
+        String m = """
+                some sig A {}
+                sig B extends A {}
+                fact { no A - B }
+                """;
+        check(m, m, Analysis.CommonInst, false, true);
+        check(m, m, Analysis.Equivalence, false, false);
+    }
+
+    /** "lone sig A" restricts A together with B extends A. */
+    @Test
+    public void loneParentRestrictsSubSigAtoms() {
+        String m = """
+                lone sig A {}
+                sig B extends A {}
+                fact { #A = 2 }
+                """;
+        // the model has no instance (plain Alloy: UNSAT)
+        check(m, m, Analysis.CommonInst, false, false);
+    }
+
+    /** multiplicity of a parent that has sub-sigs in one version only. */
+    @Test
+    public void someParentWithSubSigsInOneVersionOnly() {
+        String m1 = """
+                some sig A {}
+                """;
+        String m2 = """
+                some sig A {}
+                sig B extends A {}
+                fact { no A - B }
+                """;
+        // instances of m2 have B atoms, m1 has no B
+        check(m1, m2, Analysis.SemDiff, false, true);
+    }
+
+    /**
+     * abstract with sub-sigs in v1, abstract without sub-sigs in v2. v1 has
+     * no instance (A has no atoms outside B), so there is no common instance.
+     */
+    @Test
+    public void abstractWithAndWithoutChildren() {
+        String m1 = """
+                abstract sig A {}
+                sig B extends A {}
+                fact { some A - B }
+                """;
+        String m2 = """
+                abstract sig A {}
+                """;
+        check(m1, m2, Analysis.CommonInst, false, false);
+        // m1 has no instances, m2 has: not equivalent
+        check(m1, m2, Analysis.Equivalence, false, true);
+    }
+
+    /**
+     * "exactly 2 P" bounds P together with C extends P; it must not force C to
+     * be empty. Needs withPred = true, otherwise the command scope is not used.
+     */
+    @Test
+    public void exactScopeOnParentSig() {
+        String m = """
+                sig P {}
+                sig C extends P {}
+                fact { some C }
+                run {} for exactly 2 P
+                """;
+        check(m, m, Analysis.CommonInst, true, true);
+        check(m, m, Analysis.Equivalence, true, false);
+    }
+
+    /** util/ordering makes the ordered signature exact. */
+    @Test
+    public void orderedParentSigWithSubSig() {
+        String m = """
+                open util/ordering[P]
+                sig P {}
+                sig C extends P {}
+                fact { some C and some P - C }
+                run {} for 3
+                """;
+        check(m, m, Analysis.CommonInst, true, true);
+    }
+
+    /**
+     * at scope 3 "#A <= 4" excludes nothing, so there is no difference. Before
+     * the fix the literal 4 overflowed (bitwidth 3) and a spurious difference
+     * (the empty instance) was reported.
+     */
+    @Test
+    public void literalInFactDoesNotOverflow() {
+        String m1 = """
+                sig A {}
+                fact { #A <= 4 }
+                """;
+        String m2 = """
+                sig A {}
+                """;
+        check(m1, m2, Analysis.SemDiff, false, false);
+        check(m1, m2, Analysis.Equivalence, false, false);
+    }
+
+    /** Alloy's default bitwidth 4 represents 4..7. */
+    @Test
+    public void defaultBitwidthIsAlloysDefault() {
+        String m = """
+                sig A { n: Int }
+                fact { some A and all a: A | a.n > 3 }
+                """;
+        check(m, m, Analysis.CommonInst, false, true);
+    }
+
+    /**
+     * the bitwidth of the command ("but 6 Int", range -32..31) is used. With
+     * Alloy's default bitwidth 4 (max 7) or the old computed bitwidth 3 there is
+     * no instance.
+     */
+    @Test
+    public void bitwidthOfCommandIsUsed() {
+        String m = """
+                sig A { n: Int }
+                fact { some A and all a: A | a.n > 7 and a.n < 20 }
+                run {} for 3 but 6 Int
+                """;
+        check(m, m, Analysis.CommonInst, true, true);
+    }
+
+    /** binary field unique to v1 with an arrow multiplicity. */
+    @Test
+    public void uniqueBinaryFieldWithArrowMultiplicity() {
+        String m1 = """
+                sig A { f: B -> one C }
+                sig B {}
+                sig C {}
+                """;
+        String m2 = """
+                sig A {}
+                sig B {}
+                sig C {}
+                fact { some A and some B }
+                """;
+        // instances of m2 with A and B atoms have no f, m1 requires f to be total
+        check(m1, m2, Analysis.SemDiff, false, true);
+    }
+
+    /** binary field of a SubsetSig with an arrow multiplicity. */
+    @Test
+    public void subsetSigBinaryFieldWithArrowMultiplicity() {
+        String m = """
+                sig B {}
+                sig A {}
+                sig S in A { f: B -> one B }
+                fact { some A - S and some B }
+                """;
+        check(m, m, Analysis.CommonInst, false, true);
+        check(m, m, Analysis.Equivalence, false, false);
+    }
+
+    /**
+     * opposite field orders create a field cycle in the merge. The placeholder
+     * field must allow sets (not "one") and atoms of B extends A.
+     */
+    @Test
+    public void fieldCyclePlaceholderAllowsSetsAndSubSigAtoms() {
+        String m1 = """
+                sig A { f: set A, g: set f }
+                sig B extends A {}
+                fact { some a: A | some a.f & B }
+                """;
+        String m2 = """
+                sig A { g: set A, f: set g }
+                sig B extends A {}
+                fact { some a: A | some a.f & B }
+                """;
+        check(m1, m2, Analysis.CommonInst, false, true);
+    }
+
+    /** the placeholder of a mutable field must be mutable. */
+    @Test
+    public void fieldCyclePlaceholderKeepsVar() {
+        String m1 = """
+                sig A { var f: set A, var g: set f }
+                fact { eventually f != f' }
+                """;
+        String m2 = """
+                sig A { var g: set A, var f: set g }
+                fact { eventually f != f' }
+                """;
+        check(m1, m2, Analysis.CommonInst, false, true);
+    }
+
+    /**
+     * in m1 field f is static, so with no S in the first state f is
+     * empty forever. The m2 trace in which S.f becomes non-empty later is not a
+     * trace of m1.
+     */
+    @Test
+    public void staticFieldOfVarSigIsFramedAsAWhole() {
+        String m1 = """
+                sig B {}
+                var sig S { f: set B }
+                """;
+        String m2 = """
+                sig B {}
+                var sig S { var f: set B }
+                fact { no S and eventually some S.f }
+                """;
+        assertEquals(true, solve(m1, m2, Analysis.SemDiff, 3, false));
+    }
+
+    /**
+     * Alloy enforces "f: one B" of a static field of a var sig
+     * in every state, also for atoms that join S later. In m1 (no S at first, so f
+     * is empty forever) a later S atom violates "one B"; m2 allows it.
+     */
+    @Test
+    public void staticFieldDeclarationOfVarSigHoldsInAllStates() {
+        String m1 = """
+                sig B {}
+                var sig S { f: one B }
+                """;
+        String m2 = """
+                sig B {}
+                var sig S { var f: lone B }
+                fact { some B and no S and eventually some S }
+                """;
+        assertEquals(true, solve(m1, m2, Analysis.SemDiff, 3, false));
+    }
+
+    /** the fix must not exclude traces: a static field is also a var field. */
+    @Test
+    public void staticFieldTracesAreVarFieldTraces() {
+        String m1 = """
+                sig B {}
+                var sig S { var f: one B }
+                """;
+        String m2 = """
+                sig B {}
+                var sig S { f: one B }
+                """;
+        assertEquals(false, solve(m1, m2, Analysis.SemDiff, 3, false));
+    }
+
+    /**
+     * "for 2 S" bounds the atoms that S uses over the whole trace. m2 uses 3
+     * distinct atoms (after an empty first state), which m1 cannot.
+     */
+    @Test
+    public void scopeOfVarSigBoundsAllStates() {
+        String m1 = """
+                var sig S {}
+                run {} for 2 S
+                """;
+        String m2 = """
+                var sig S {}
+                fact { no S and eventually #S = 3 }
+                run {} for 3 S
+                """;
+        assertEquals(true, solve(m1, m2, Analysis.SemDiff, -1, true));
+    }
+
+    /** same for a var signature hierarchy (bound on parent plus children). */
+    @Test
+    public void scopeOfVarSigHierarchyBoundsAllStates() {
+        String m1 = """
+                var sig P {}
+                var sig C extends P {}
+                run {} for 2 P
+                """;
+        String m2 = """
+                var sig P {}
+                var sig C extends P {}
+                fact { no P and eventually (one C and after (one C and C' != C and after (one P - C))) }
+                run {} for 3 P
+                """;
+        assertEquals(true, solve(m1, m2, Analysis.SemDiff, -1, true));
+    }
+
+    /** the larger scope includes all traces of the smaller one. */
+    @Test
+    public void smallerVarScopeIsIncluded() {
+        String m1 = """
+                var sig S {}
+                run {} for 3 S
+                """;
+        String m2 = """
+                var sig S {}
+                run {} for 2 S
+                """;
+        assertEquals(false, solve(m1, m2, Analysis.SemDiff, -1, true));
+    }
+
+    /**
+     * scope -1 (used by the GUI) compares with the scopes of the commands. At
+     * scope 5, m2 has an instance with 5 atoms that m1 excludes.
+     */
+    @Test
+    public void scopeMinusOneUsesCommandScopes() {
+        String m1 = """
+                sig A {}
+                fact { #A <= 4 }
+                run {} for 5
+                """;
+        String m2 = """
+                sig A {}
+                run {} for 5
+                """;
+        assertEquals(true, solve(m1, m2, Analysis.SemDiff, -1, true));
+        // an explicit maximum scope still caps the comparison
+        assertEquals(false, solve(m1, m2, Analysis.SemDiff, 3, true));
+    }
+
+    /** different command scopes are compared as given. */
+    @Test
+    public void largerCommandScopeAddsInstances() {
+        String m1 = """
+                sig A {}
+                run {} for 3
+                """;
+        String m2 = """
+                sig A {}
+                run {} for 4
+                """;
+        assertEquals(true, solve(m1, m2, Analysis.SemDiff, -1, true));
+        assertEquals(false, solve(m2, m1, Analysis.SemDiff, -1, true));
+    }
+
+    /** an exact scope above 3 is respected. */
+    @Test
+    public void exactScopeAboveThree() {
+        String m = """
+                sig A {}
+                fact { #A = 4 }
+                run {} for exactly 4 A
+                """;
+        assertEquals(true, solve(m, m, Analysis.CommonInst, -1, true));
+    }
+
+    /**
+     * a signature fact of a var sig holds in every state (as in Alloy). The
+     * model has no instance: "no B" must also hold once S has atoms.
+     */
+    @Test
+    public void sigFactOfVarSigHoldsInAllStates() {
+        String m = """
+                sig B {}
+                var sig S {} { no B }
+                fact { some B and no S and eventually some S }
+                """;
+        assertEquals(false, solve(m, m, Analysis.CommonInst, 3, false));
+    }
+
+    /** a sig fact is temporal if it calls a predicate on mutable state. */
+    @Test
+    public void sigFactCallingTemporalPredicateHoldsInAllStates() {
+        String m = """
+                sig B {}
+                var sig X {}
+                pred q { no X }
+                sig S {} { q }
+                fact { some S and no X and eventually some X }
+                """;
+        assertEquals(false, solve(m, m, Analysis.CommonInst, 3, false));
+    }
+
+    /** the m2 trace violates the sig fact of m1 in a later state. */
+    @Test
+    public void sigFactOfVarSigDifference() {
+        String m1 = """
+                sig B {}
+                var sig S {} { no B }
+                """;
+        String m2 = """
+                sig B {}
+                var sig S {}
+                fact { some B and no S and eventually some S }
+                """;
+        assertEquals(true, solve(m1, m2, Analysis.SemDiff, 3, false));
     }
 
 }

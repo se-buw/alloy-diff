@@ -13,6 +13,7 @@ import java.util.Set;
 import java.util.Stack;
 
 import edu.mit.csail.sdg.alloy4.ConstList;
+import edu.mit.csail.sdg.alloy4.Err;
 import edu.mit.csail.sdg.alloy4.Pos;
 import edu.mit.csail.sdg.ast.Attr;
 import edu.mit.csail.sdg.ast.Decl;
@@ -36,6 +37,7 @@ import edu.mit.csail.sdg.ast.Sig.PrimSig;
 import edu.mit.csail.sdg.ast.Sig.SubsetSig;
 import edu.mit.csail.sdg.ast.Type;
 import edu.mit.csail.sdg.ast.Type.ProductType;
+import edu.mit.csail.sdg.ast.VisitQuery;
 
 public class ModuleMerger {
 
@@ -91,6 +93,16 @@ public class ModuleMerger {
 
 	private record ExprPair(Expr e1, Expr e2) {
 	}
+
+	/**
+	 * A lone/one/some multiplicity of an original signature with sub-signatures
+	 * that still has to be added to c1 (inV1) or c2 over the inheritance
+	 * expression of that signature.
+	 */
+	private record PendingMultiplicity(Sig merged, Sig old, boolean inV1) {
+	}
+
+	private final List<PendingMultiplicity> pendingParentMultiplicities = new ArrayList<>();
 
 	protected Map<String, Sig> v1Sigs;
 	protected Map<String, Sig> v2Sigs;
@@ -150,6 +162,7 @@ public class ModuleMerger {
 		c2 = ExprConstant.TRUE;
 		c1Constraints = new ArrayList<>();
 		c2Constraints = new ArrayList<>();
+		pendingParentMultiplicities.clear();
 		maxInt = 0;
 
 		// fill look-up tables
@@ -180,8 +193,10 @@ public class ModuleMerger {
 					// check if needed: abstract sigs with children are not needed
 					if (old.isAbstract == null || v1iu.getSubSigs(old) == null) {
 						// ONE to LONE (merged sig may not have exactly one atom)
+						// (not for signatures with sub-signatures: the merged signature is flat
+						// and the multiplicity is enforced over the sig and its sub-sigs in c1)
 						Sig s = null;
-						if (old.isLone != null || old.isOne != null) {
+						if ((old.isLone != null || old.isOne != null) && !hasSubSigs(old, v1iu)) {
 							s = new PrimSig(sName, old.isVariable != null 
 										? new Attr[]{Attr.LONE, Attr.VARIABLE} 
 										: new Attr[]{Attr.LONE});
@@ -205,8 +220,10 @@ public class ModuleMerger {
 				if (old instanceof PrimSig) {
 					if (old.isAbstract == null || v2iu.getSubSigs(old) == null) {
 						// ONE to LONE (merged sig may not have exactly one atom)
+						// (not for signatures with sub-signatures: the merged signature is flat
+						// and the multiplicity is enforced over the sig and its sub-sigs in c2)
 						Sig s = null;
-						if (old.isLone != null || old.isOne != null) {
+						if ((old.isLone != null || old.isOne != null) && !hasSubSigs(old, v2iu)) {
 							s = new PrimSig(sName, old.isVariable != null 
 										? new Attr[]{Attr.LONE, Attr.VARIABLE} 
 										: new Attr[]{Attr.LONE});
@@ -228,16 +245,20 @@ public class ModuleMerger {
 		buildInheritanceSigExpr(v1, v1iu, v1SigExpr);
 		buildInheritanceSigExpr(v2, v2iu, v2SigExpr);
 
+		// multiplicities of signatures with sub-signatures range over the
+		// signature and its sub-signatures
+		addPendingParentMultiplicities();
+
 		// INFO we don't support merging SubsetSig and PrimSig
 
 		// create SubsetSig as union from both modules
 		for (Sig s1 : v1Sigs.values()) {
 			if (s1 instanceof SubsetSig) {
-				Set<Sig> ps1 = parents((SubsetSig) s1);
+				Set<Sig> ps1 = parents((SubsetSig) s1, v1iu);
 				Sig s2 = v2Sigs.get(s1.label);
 				if (s2 != null) {
 					if (s2 instanceof SubsetSig) {
-						Set<Sig> ps2 = parents((SubsetSig)s2);
+						Set<Sig> ps2 = parents((SubsetSig) s2, v2iu);
 						Set<Sig> union = new LinkedHashSet<>();
 						union.addAll(ps1);
 						union.addAll(ps2);
@@ -289,7 +310,7 @@ public class ModuleMerger {
 		for (Sig s2 : v2Sigs.values()) {			
 			if (s2 instanceof SubsetSig) {
 				if (sigs.get(s2.label) == null) { // we have not handled it in the above cases, i.e., it is unique in v2
-					Set<Sig> ps2 = parents((SubsetSig) s2);
+					Set<Sig> ps2 = parents((SubsetSig) s2, v2iu);
 					ExprPair cs = addUniqueSubsetSig(s2, ps2, c2, c1, c2Constraints, c1Constraints);
 					c2 = cs.e1();
 					c1 = cs.e2();
@@ -301,8 +322,8 @@ public class ModuleMerger {
 
 		// add containment of SubsetSigs in hierarchy (removed above as it could be contradicting in the two versions):
 		// for sig A in B + C ... {} add c1/c2 A in B + C
-		c1 = restoreSubSetSigHierarchy(v1Sigs, c1, c1Constraints);
-		c2 = restoreSubSetSigHierarchy(v2Sigs, c2, c2Constraints);
+		c1 = restoreSubSetSigHierarchy(v1Sigs, v1SigExpr, c1, c1Constraints);
+		c2 = restoreSubSetSigHierarchy(v2Sigs, v2SigExpr, c2, c2Constraints);
 	
 
 		// add fields to merged signatures
@@ -332,16 +353,43 @@ public class ModuleMerger {
 		return sigs.values();
 	}
 
-	private Expr restoreSubSetSigHierarchy(Map<String, Sig> oldSigs, Expr cOld, List<ConstraintInfo> constraints) {
+	/**
+	 * Adds {@code sub in p1 + ... + pn} for every SubsetSig {@code sig sub in p1 + ... + pn}
+	 * of one version.
+	 * <p>
+	 * The merged PrimSigs are flat (they do not extend each other), so a merged
+	 * parent signature does not contain the atoms of its sub-signatures. Each
+	 * PrimSig parent is therefore replaced by its inheritance expression from
+	 * {@code sigExpr} (parent plus all sub-signatures), exactly as references to
+	 * signatures are translated in {@link #replaceSigRefs(Expr, boolean)}.
+	 * SubsetSig parents are the merged SubsetSigs themselves.
+	 * <p>
+	 * If a parent cannot be resolved, the containment constraint is skipped for
+	 * that SubsetSig: a union with a missing operand would be too small and
+	 * would wrongly exclude instances.
+	 *
+	 * @param oldSigs     signatures of the version (by label)
+	 * @param sigExpr     inheritance expressions of the same version
+	 *                    (v1SigExpr or v2SigExpr)
+	 * @param cOld        current constraint of that version
+	 * @param constraints tracked conjuncts of that version
+	 */
+	private Expr restoreSubSetSigHierarchy(Map<String, Sig> oldSigs, Map<String, Expr> sigExpr, Expr cOld,
+			List<ConstraintInfo> constraints) {
 		for (Sig s : oldSigs.values()) {
 			if (s instanceof SubsetSig) {
 				SubsetSig sub = (SubsetSig) s;
 				Expr parentUnion = null;
+				boolean resolved = true;
 				for (Sig parent : sub.parents) {
-					Sig p = sigs.get(parent.label);
+					Expr p = mergedParentExpr(parent, sigExpr);
+					if (p == null) {
+						resolved = false;
+						break;
+					}
 					parentUnion = (parentUnion == null) ? p : parentUnion.plus(p);
 				}
-				if (parentUnion != null) {
+				if (resolved && parentUnion != null) {
 					Sig c = sigs.get(sub.label);
 					Expr constraint = alwaysIfVar(c.in(parentUnion), c.isVariable != null);
 					trackConstraint(constraints, constraint, ConstraintOrigin.SIG_HIERARCHY);
@@ -350,6 +398,28 @@ public class ModuleMerger {
 			}
 		}
 		return cOld;
+	}
+
+	/**
+	 * Expression in the merged module that denotes the atoms of an original
+	 * parent signature of a SubsetSig: the merged SubsetSig for SubsetSig parents,
+	 * the inheritance expression (or the merged sig) for PrimSig parents, and the
+	 * built-in signature for built-in parents.
+	 *
+	 * @return the expression or null if the parent cannot be resolved
+	 */
+	private Expr mergedParentExpr(Sig parent, Map<String, Expr> sigExpr) {
+		if (parent instanceof SubsetSig) {
+			return sigs.get(parent.label);
+		}
+		Expr e = sigExpr.get(parent.label);
+		if (e == null) {
+			e = sigs.get(parent.label);
+		}
+		if (e == null) {
+			e = getInternalSig(parent.label);
+		}
+		return e;
 	}
 
 	private ExprPair addUniqueSubsetSig(Sig oldSig, Set<Sig> newParents, Expr c1, Expr c2, List<ConstraintInfo> ownerConstraints, List<ConstraintInfo> otherConstraints) {
@@ -419,12 +489,16 @@ public class ModuleMerger {
 	/**
 	 * compute a set of transitive parent PrimSigs (merged sigs in new module)
 	 * 
-	 * @param sub1
+	 * @param sub1 a SubsetSig of the version described by {@code iu}
+	 * @param iu   inheritance information of the version {@code sub1} comes from;
+	 *             its sub-signature map is keyed by that version's Sig objects, so
+	 *             passing the other version's InheritanceUtil silently loses all
+	 *             sub-signatures of the parents
 	 * @return
 	 */
-	private Set<Sig> parents(SubsetSig sub1) {
+	private Set<Sig> parents(SubsetSig sub1, InheritanceUtil iu) {
 		Set<Sig> parents = new LinkedHashSet<>();
-		for (Sig p : v1iu.getFlattenedParents(sub1)) {
+		for (Sig p : iu.getFlattenedParents(sub1)) {
 			Sig c = sigs.get(p.label);
 			if (c != null) { // could be the case for abstract signatures
 				parents.add(c);
@@ -460,6 +534,14 @@ public class ModuleMerger {
 				for (Expr conjunct : Conjuncts.of(of)) {
 					Expr body = replaceSigRefs(conjunct, decls, inV1);
 					Expr sigFact = ExprQt.Op.ALL.make(of.pos, of.closingBracket, decls, body);
+					// As in Alloy (TranslateAlloyToKodkod.makeFacts), a signature fact that
+					// is temporal (mentions a mutable sig/field or a temporal operator)
+					// holds in every state, not only in the first one. Deciding on the
+					// merged expression is safe: whatever is mutable only in the merged
+					// module is framed (constant) in this version's constraint.
+					if (isTemporal(sigFact)) {
+						sigFact = ExprUnary.Op.ALWAYS.make(null, sigFact);
+					}
 					Pos pos = ConstraintInfo.sourcePos(conjunct);
 					if (inV1) {
 						trackConstraint(c1Constraints, sigFact, pos, ConstraintOrigin.SIG_FACT);
@@ -475,6 +557,71 @@ public class ModuleMerger {
 			}
 		}
 
+	}
+
+	/**
+	 * True if {@code e} is a temporal formula in the sense of Alloy's translation
+	 * (TemporalTranslator.isTemporal on the Kodkod formula): it contains a temporal
+	 * operator or refers to a mutable signature or field, also through the body of
+	 * a called function or predicate.
+	 */
+	static boolean isTemporal(Expr e) {
+		Set<Func> visited = new HashSet<>();
+		VisitQuery<Object> q = new VisitQuery<Object>() {
+
+			@Override
+			public Object visit(ExprUnary x) throws Err {
+				switch (x.op) {
+				case AFTER:
+				case BEFORE:
+				case PRIME:
+				case HISTORICALLY:
+				case ALWAYS:
+				case ONCE:
+				case EVENTUALLY:
+					return x;
+				default:
+					return super.visit(x);
+				}
+			}
+
+			@Override
+			public Object visit(ExprBinary x) throws Err {
+				switch (x.op) {
+				case UNTIL:
+				case SINCE:
+				case TRIGGERED:
+				case RELEASES:
+					return x;
+				default:
+					return super.visit(x);
+				}
+			}
+
+			@Override
+			public Object visit(Sig x) throws Err {
+				return x.isVariable != null ? x : null;
+			}
+
+			@Override
+			public Object visit(Field x) throws Err {
+				return x.isVariable != null ? x : null;
+			}
+
+			@Override
+			public Object visit(ExprCall x) throws Err {
+				Object ans = super.visit(x);
+				if (ans == null && visited.add(x.fun)) {
+					ans = x.fun.getBody().accept(this);
+				}
+				return ans;
+			}
+		};
+		try {
+			return e.accept(q) != null;
+		} catch (Err ex) {
+			return false;
+		}
 	}
 
 	/**
@@ -559,7 +706,13 @@ public class ModuleMerger {
 	 * @return
 	 */
 	private Sig mergeSig(Sig s1, Sig s2) {
-		Sig s = new PrimSig(s1.label, getMergedSigAttributes(s1, s2));
+		Attr[] attrs = getMergedSigAttributes(s1, s2);
+		if (hasSubSigs(s1, v1iu) || hasSubSigs(s2, v2iu)) {
+			// the merged signature is flat; lone/one/some are enforced in c1/c2 over
+			// the signature and its sub-signatures
+			attrs = withoutMultiplicities(attrs);
+		}
+		Sig s = new PrimSig(s1.label, attrs);
 		c1 = generateSigAttributeConstraints(s, s1, v1iu, c1, c1Constraints);
 		c2 = generateSigAttributeConstraints(s, s2, v2iu, c2, c2Constraints);
 
@@ -611,7 +764,14 @@ public class ModuleMerger {
 								// We have a field cycle: break it by creating a permissive placeholder for the
 								// missing dependency, using the missing field's type rather than the current field's.
 								if (getField(mergedSig, missingField) == null && (missingF1 != null || missingF2 != null)) {
-									mergedSig.addField(missingField, generalFieldType(missingF1, missingF2));
+									// The placeholder is the declaration of the merged field: it is
+									// not re-created when the missing field is merged later (only
+									// its c1/c2 constraints are added). It must therefore be as
+									// permissive as the field's type in both versions, and mutable
+									// if the field is mutable in either version.
+									Pos isVar = (missingF1 != null && missingF1.isVariable != null) ? missingF1.isVariable
+											: (missingF2 != null ? missingF2.isVariable : null);
+									mergedSig.addField(missingField, generalFieldType(missingF1, missingF2), isVar);
 								}
 								// We leave nextField on the stack and let the loop naturally retry it.
 								// If nextField depends on multiple unmerged fields, this retry
@@ -636,16 +796,24 @@ public class ModuleMerger {
 	 * Creates a bounding expression of arity N-1 for a field of arity N
 	 * by stripping the first column of the field's type.
 	 */
-	private Expr boundExprForType(Type type) {
+	private Expr boundExprForType(Type type, boolean inV1) {
 		if (type == null) return UNIV;
+		Map<String, Expr> sigExpr = inV1 ? v1SigExpr : v2SigExpr;
 		Expr res = null;
 		for (ProductType pt : type) {
 			Expr prod = null;
 			// Skip the first column (the owner signature) to get the bound type
 			for (int i = 1; i < pt.arity(); i++) {
-				Sig s = sigs.get(pt.get(i).label);
+				String label = pt.get(i).label;
+				// a column of type S contains the atoms of S and of all its
+				// sub-signatures, i.e., the inheritance expression of S (the
+				// merged signatures are flat)
+				Expr s = sigExpr.get(label);
 				if (s == null) {
-					s = getInternalSig(pt.get(i).label);
+					s = sigs.get(label);
+				}
+				if (s == null) {
+					s = getInternalSig(label);
 				}
 				if (s == null) {
 					s = UNIV;
@@ -661,19 +829,29 @@ public class ModuleMerger {
 		return res != null ? res : UNIV;
 	}
 
+	/**
+	 * A permissive declaration bound for a merged field: the union of the types
+	 * of the field in both versions (without the owner column). Unary bounds are
+	 * declared with "set" because a bound without multiplicity means "one" for
+	 * unary fields in Alloy.
+	 */
 	private Expr generalFieldType(Field f1, Field f2) {
-		Expr type1 = (f1 == null) ? null : boundExprForType(f1.type());
-		Expr type2 = (f2 == null) ? null : boundExprForType(f2.type());
+		Expr type1 = (f1 == null) ? null : boundExprForType(f1.type(), true);
+		Expr type2 = (f2 == null) ? null : boundExprForType(f2.type(), false);
+		Expr res;
 		if (type1 == null) {
-			return type2;
+			res = type2;
+		} else if (type2 == null) {
+			res = type1;
+		} else if (type1.isSame(type2)) {
+			res = type1;
+		} else {
+			res = type1.plus(type2);
 		}
-		if (type2 == null) {
-			return type1;
+		if (res != null && res.type().arity() == 1) {
+			res = ExprUnary.Op.SETOF.make(null, res);
 		}
-		if (type1.isSame(type2)) {
-			return type1;
-		}
-		return type1.plus(type2);
+		return res;
 	}
 
 	private void mergeField(Sig mergedSig, Field f1, Field f2) {
@@ -710,15 +888,15 @@ public class ModuleMerger {
 				Expr e1mult = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), quantBody1);
 				Expr e2mult = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), quantBody2);
 
-				{ Expr fc = alwaysIfVar(e1mult, f1.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
+				{ Expr fc = alwaysIfVar(e1mult, mutable(mergedSig, f)); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 				if (f1.isVariable == null && f.isVariable != null) {
-					// Must quantify over all atosm- all this: Sig | always (this.f' = this.f)
-					{ Expr fc = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_FRAME); c1 = c1.and(fc); }
+					// the field is static in this version: its whole relation must not change (not only for the atoms of the sig in the first state)
+					{ Expr fc = fieldFrame(f); trackConstraint(c1Constraints, fc, f1.pos, ConstraintOrigin.FIELD_FRAME); c1 = c1.and(fc); }
 				}
-				{ Expr fc = alwaysIfVar(e2mult, f2.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
+				{ Expr fc = alwaysIfVar(e2mult, mutable(mergedSig, f)); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 				if (f2.isVariable == null && f.isVariable != null) {
 					// Expr frameBody2 = ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)));
-					{ Expr fc = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_FRAME); c2 = c2.and(fc); }
+					{ Expr fc = fieldFrame(f); trackConstraint(c2Constraints, fc, f2.pos, ConstraintOrigin.FIELD_FRAME); c2 = c2.and(fc); }
 				}
 			} else if (f1.decl().expr instanceof ExprBinary && f2.decl().expr instanceof ExprBinary) { // relational
 																										// fields
@@ -726,8 +904,15 @@ public class ModuleMerger {
 				Expr e2 = replaceSigRefs(f2.decl().expr, names, false);
 				Field f = (Field) getField(mergedSig, f1.label);
 				if (f == null) {
-					if (e1.isSame(e2)) {
+					boolean fromSubset = v1iu.getFieldsFromSubsetSig().contains(f1)
+							|| v2iu.getFieldsFromSubsetSig().contains(f2);
+					if (e1.isSame(e2) && !fromSubset) {
 						f = mergedSig.addField(f1.label, e1, isVar);
+					} else if (e1.isSame(e2)) {
+						// a field of a SubsetSig is empty for atoms outside the SubsetSig;
+						// arrow multiplicities in the declaration would contradict that.
+						// They are enforced in c1/c2 below (only for atoms in the SubsetSig).
+						f = mergedSig.addField(f1.label, replaceArrows(e1), isVar);
 					} else {
 						Expr union = replaceArrows(e1).plus(replaceArrows(e2));
 						f = mergedSig.addField(f1.label, union, isVar);
@@ -748,14 +933,14 @@ public class ModuleMerger {
 				Expr e1mult = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), quantBody1);
 				Expr e2mult = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), quantBody2);
 
-				{ Expr fc = alwaysIfVar(e1mult, f1.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
+				{ Expr fc = alwaysIfVar(e1mult, mutable(mergedSig, f)); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 				if (f1.isVariable == null && f.isVariable != null) {
-					// Must quantify over all atosm- all this: Sig | always (this.f' = this.f)
-					{ Expr fc = ExprQt.Op.ALL.make(f1.pos, f1.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_FRAME); c1 = c1.and(fc); }
+					// the field is static in this version: its whole relation must not change (not only for the atoms of the sig in the first state)
+					{ Expr fc = fieldFrame(f); trackConstraint(c1Constraints, fc, f1.pos, ConstraintOrigin.FIELD_FRAME); c1 = c1.and(fc); }
 				}
-				{ Expr fc = alwaysIfVar(e2mult, f2.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
+				{ Expr fc = alwaysIfVar(e2mult, mutable(mergedSig, f)); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 				if (f2.isVariable == null && f.isVariable != null) {
-					{ Expr fc = ExprQt.Op.ALL.make(f2.pos, f2.closingBracket, List.of(ths), ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)))); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_FRAME); c2 = c2.and(fc); }
+					{ Expr fc = fieldFrame(f); trackConstraint(c2Constraints, fc, f2.pos, ConstraintOrigin.FIELD_FRAME); c2 = c2.and(fc); }
 				}
 			} else {
 				throw new RuntimeException("Mix of field arities " + f1.pos);
@@ -765,6 +950,28 @@ public class ModuleMerger {
 		} else if (f2 != null) {
 			addUniqueField(mergedSig, f2, false);
 		}
+	}
+
+	/**
+	 * Frame condition for a field that is static in one version but mutable in
+	 * the merged module: the whole relation of the merged field stays the same in
+	 * all states. (Quantifying over the atoms of the signature, as before, only
+	 * covers the atoms that are in a mutable signature in the first state.)
+	 */
+	private Expr fieldFrame(Field f) {
+		return ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, f), f));
+	}
+
+	/**
+	 * True if a field of the merged signature may change over time, i.e., the
+	 * merged field or the merged signature is mutable. Alloy enforces the
+	 * declaration of a field of a mutable signature in every state, also if the
+	 * field itself is static (atoms that join the signature later must satisfy
+	 * the declaration as well), so the declaration constraints in c1/c2 are then
+	 * wrapped in always.
+	 */
+	private boolean mutable(Sig mergedSig, Field f) {
+		return f.isVariable != null || mergedSig.isVariable != null;
 	}
 
 	/**
@@ -805,31 +1012,34 @@ public class ModuleMerger {
 									quantBody1 = ExprITE.make(f.pos, ths.get().in(sigs.get(f.sig.label)),
 											quantBody1, ths.get().join(merged).no());
 									Expr e1mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody1);
-									{ Expr fc = alwaysIfVar(e1mult, f.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
+									{ Expr fc = alwaysIfVar(e1mult, f.isVariable != null || s.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 								} else {
 									Decl ths = s.decl;
 									Expr quantBody2 = ths.get().join(merged).in(origBound);
 									quantBody2 = ExprITE.make(f.pos, ths.get().in(sigs.get(f.sig.label)),
 											quantBody2, ths.get().join(merged).no());
 									Expr e2mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody2);
-									{ Expr fc = alwaysIfVar(e2mult, f.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
+									{ Expr fc = alwaysIfVar(e2mult, f.isVariable != null || s.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 								}
 							} else {
-								// case 2: add relational field as is (it cannot have a multiplicity) 
-								Field merged = s.addField(f.label, bound, f.isVariable);
+								// case 2: relational field. Arrow multiplicities (e.g. "B -> one C")
+								// would force the field to be non-empty for atoms outside the
+								// SubsetSig as well, contradicting "no this.f" for those atoms. Declare
+								// it with plain arrows and enforce the original declaration only for
+								// atoms in the SubsetSig.
+								Expr declared = replaceArrows(bound);
+								Field merged = s.addField(f.label, declared, f.isVariable);
+								Decl ths = s.decl;
+								Expr quantBody = declared.isSame(bound)
+										? ths.get().in(sigs.get(f.sig.label)).or(ths.get().join(merged).no())
+										: ExprITE.make(f.pos, ths.get().in(sigs.get(f.sig.label)),
+												ths.get().join(merged).in(bound), ths.get().join(merged).no());
+								Expr emult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody);
 								// field needs to be suppressed
 								if (inV1) {
-									Decl ths = s.decl;
-									Expr quantBody1 = ths.get().in(sigs.get(f.sig.label))
-											.or(ths.get().join(merged).no());
-									Expr e1mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody1);
-									{ Expr fc = alwaysIfVar(e1mult, f.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
+									{ Expr fc = alwaysIfVar(emult, f.isVariable != null || s.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 								} else {
-									Decl ths = s.decl;
-									Expr quantBody2 = ths.get().in(sigs.get(f.sig.label))
-											.or(ths.get().join(merged).no());
-									Expr e2mult = ExprQt.Op.ALL.make(f.pos, f.closingBracket, List.of(ths), quantBody2);
-									{ Expr fc = alwaysIfVar(e2mult, f.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
+									{ Expr fc = alwaysIfVar(emult, f.isVariable != null || s.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 								}
 							}
 						} else {
@@ -880,7 +1090,7 @@ public class ModuleMerger {
 							ths.get().join(f).no());
 				}
 				Expr e1mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-				{ Expr fc = alwaysIfVar(e1mult, field.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
+				{ Expr fc = alwaysIfVar(e1mult, field.isVariable != null || mergedSig.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
 
 				{ Expr fc = alwaysIfVar(f.decl().get().no(), field.isVariable != null); trackConstraint(c2Constraints, fc, field.pos, ConstraintOrigin.CLOSED_WORLD); c2 = c2.and(fc); }
 			} else {
@@ -894,28 +1104,37 @@ public class ModuleMerger {
 				}
 
 				Expr e2mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-				{ Expr fc = alwaysIfVar(e2mult, field.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
+				{ Expr fc = alwaysIfVar(e2mult, field.isVariable != null || mergedSig.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
 			}
 		} else if (e instanceof ExprBinary) {
-			f = mergedSig.addField(field.label, e, field.isVariable);
-			if (inC1) {
-				if (v1iu.getFieldsFromSubsetSig().contains(field)) {
-					Decl ths = mergedSig.decl;
+			// The field only exists in one version and must be empty in the other one
+			// (closed world). Arrow multiplicities such as "B -> one C" in the
+			// declaration would force the field to be non-empty for every atom of the
+			// merged signature, contradicting the closed-world constraint (and, for
+			// fields of SubsetSigs, "no this.f" for atoms outside the SubsetSig).
+			// Hence the field is declared with plain arrows and the original
+			// declaration (with multiplicities) is enforced in the owner's constraint.
+			Expr declared = replaceArrows(e);
+			boolean relaxed = !declared.isSame(e);
+			boolean fromSubset = (inC1 ? v1iu : v2iu).getFieldsFromSubsetSig().contains(field);
+			f = mergedSig.addField(field.label, declared, field.isVariable);
+			Expr ownerConstraint = null;
+			if (relaxed || fromSubset) {
+				Decl ths = mergedSig.decl;
+				Expr quantBody = ths.get().join(f).in(e);
+				if (fromSubset) {
 					// make empty if not in SubsetSig
-					Expr quantBody = ths.get().in(sigs.get(field.sig.label)).or(ths.get().join(f).no());
-					Expr e1mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-					{ Expr fc = alwaysIfVar(e1mult, field.isVariable != null); trackConstraint(c1Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(fc); }
+					quantBody = ExprITE.make(field.pos, ths.get().in(sigs.get(field.sig.label)), quantBody,
+							ths.get().join(f).no());
 				}
+				ownerConstraint = alwaysIfVar(ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody),
+						field.isVariable != null || mergedSig.isVariable != null);
+			}
+			if (inC1) {
+				if (ownerConstraint != null) { trackConstraint(c1Constraints, ownerConstraint, ConstraintOrigin.FIELD_MULTIPLICITY); c1 = c1.and(ownerConstraint); }
 				{ Expr fc = alwaysIfVar(f.decl().get().no(), field.isVariable != null); trackConstraint(c2Constraints, fc, field.pos, ConstraintOrigin.CLOSED_WORLD); c2 = c2.and(fc); }
 			} else {
-				if (v2iu.getFieldsFromSubsetSig().contains(field)) {
-					Decl ths = mergedSig.decl;
-					// make empty if not in SubsetSig
-					Expr quantBody = ths.get().in(sigs.get(field.sig.label)).or(ths.get().join(f).no());
-					Expr e2mult = ExprQt.Op.ALL.make(field.pos, field.closingBracket, List.of(ths), quantBody);
-					{ Expr fc = alwaysIfVar(e2mult, field.isVariable != null); trackConstraint(c2Constraints, fc, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(fc); }
-				}
-
+				if (ownerConstraint != null) { trackConstraint(c2Constraints, ownerConstraint, ConstraintOrigin.FIELD_MULTIPLICITY); c2 = c2.and(ownerConstraint); }
 				{ Expr fc = alwaysIfVar(f.decl().get().no(), field.isVariable != null); trackConstraint(c1Constraints, fc, field.pos, ConstraintOrigin.CLOSED_WORLD); c1 = c1.and(fc); }
 			}
 		}
@@ -1202,15 +1421,20 @@ public class ModuleMerger {
 				l.add(replaceArrows(e));
 			}
 			return ExprList.make(el.pos, el.closingBracket, el.op, l);
+		case "ExprITE":
+			ExprITE ite = (ExprITE) expr;
+			return ExprITE.make(ite.pos, ite.cond, replaceArrows(ite.left), replaceArrows(ite.right));
+		case "ExprLet":
+			ExprLet let = (ExprLet) expr;
+			return ExprLet.make(let.pos, let.var, let.expr, replaceArrows(let.sub));
 		case "PrimSig":
-			return expr;
+		case "SubsetSig":
 		case "Field":
-			return expr;
 		case "ExprVar":
-			return expr;
 		case "ExprQt":
-			return expr;
 		case "ExprConstant":
+		case "ExprCall":
+			// no arrows with multiplicities at the top level of these expressions
 			return expr;
 		default:
 			throw new RuntimeException(
@@ -1305,31 +1529,43 @@ public class ModuleMerger {
 
 	private Expr generateSigAttributeConstraints(Sig s, Sig old, InheritanceUtil iu, Expr c, List<ConstraintInfo> constraints) {
 		boolean isVar = (s.isVariable != null); // if merged sig is var (likely old was not) then constraints of old need to be wrapped in always
-		if (old.isAbstract != null && s.isAbstract == null) {
-			// without inheritance, abstract has no impact
-			if (iu.getSubSigs(old) != null) {
-				Expr constraint = alwaysIfVar(s.no(), isVar);
+		boolean hasSubSigs = hasSubSigs(old, iu);
+		// An abstract signature with sub-signatures has no atoms of its own. The
+		// merged signature is always flat (it has no sub-signatures in the merged
+		// module), so a merged "abstract" attribute has no effect and the
+		// constraint is needed even if the merged signature is abstract as well.
+		if (old.isAbstract != null && hasSubSigs) {
+			Expr constraint = alwaysIfVar(s.no(), isVar);
+			trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+			c = c.and(constraint);
+		}
+
+		if (hasSubSigs) {
+			// The multiplicity of old restricts old together with all its
+			// sub-signatures (in the merged module: the inheritance expression of
+			// old). That expression is only available once all signatures are
+			// merged, see addPendingParentMultiplicities().
+			if (old.isLone != null || old.isOne != null || old.isSome != null) {
+				pendingParentMultiplicities.add(new PendingMultiplicity(s, old, iu == v1iu));
+			}
+		} else {
+			if (old.isLone != null && s.isLone == null) {
+				Expr constraint = alwaysIfVar(s.lone(), isVar);
 				trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
 				c = c.and(constraint);
 			}
-		}
 
-		if (old.isLone != null && s.isLone == null) {
-			Expr constraint = alwaysIfVar(s.lone(), isVar);
-			trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
-			c = c.and(constraint);
-		}
+			if (old.isOne != null && s.isOne == null) {
+				Expr constraint = alwaysIfVar(s.one(), isVar);
+				trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+				c = c.and(constraint);
+			}
 
-		if (old.isOne != null && s.isOne == null) {
-			Expr constraint = alwaysIfVar(s.one(), isVar);
-			trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
-			c = c.and(constraint);
-		}
-
-		if (old.isSome != null && s.isSome == null) {
-			Expr constraint = alwaysIfVar(s.some(), isVar);
-			trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
-			c = c.and(constraint);
+			if (old.isSome != null && s.isSome == null) {
+				Expr constraint = alwaysIfVar(s.some(), isVar);
+				trackConstraint(constraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
+				c = c.and(constraint);
+			}
 		}
 
 		// check if merged one is var and old was not, then we need to add a constraint that the value of the signature does not change over time
@@ -1340,6 +1576,84 @@ public class ModuleMerger {
 		}
 
 		return c;
+	}
+
+	/**
+	 * True if {@code old} is a PrimSig with at least one sub-signature in its
+	 * version.
+	 */
+	private boolean hasSubSigs(Sig old, InheritanceUtil iu) {
+		return old instanceof PrimSig && iu.getSubSigs(old) != null && !iu.getSubSigs(old).isEmpty();
+	}
+
+	/**
+	 * Adds the lone/one/some constraints of signatures with sub-signatures that
+	 * were recorded by generateSigAttributeConstraints(..). Must be called after
+	 * buildInheritanceSigExpr(..) for both versions: in the original module the
+	 * multiplicity restricts the signature together with its sub-signatures, which
+	 * in the merged (flat) module is the inheritance expression.
+	 */
+	private void addPendingParentMultiplicities() {
+		for (PendingMultiplicity pm : pendingParentMultiplicities) {
+			Sig s = pm.merged();
+			Sig old = pm.old();
+			InheritanceUtil iu = pm.inV1() ? v1iu : v2iu;
+			Expr e = (pm.inV1() ? v1SigExpr : v2SigExpr).get(old.label);
+			if (e == null) {
+				e = s;
+			}
+			// wrap in always if any of the merged signatures in e is mutable
+			boolean isVar = s.isVariable != null;
+			for (Sig sub : iu.getSubSigs(old)) {
+				Sig ms = sigs.get(sub.label);
+				if (ms != null && ms.isVariable != null) {
+					isVar = true;
+				}
+			}
+			List<ConstraintInfo> constraints = pm.inV1() ? c1Constraints : c2Constraints;
+			List<Expr> cs = new ArrayList<>();
+			List<Pos> ps = new ArrayList<>();
+			if (old.isLone != null) {
+				cs.add(alwaysIfVar(e.lone(), isVar));
+				ps.add(old.isLone);
+			}
+			if (old.isOne != null) {
+				cs.add(alwaysIfVar(e.one(), isVar));
+				ps.add(old.isOne);
+			}
+			if (old.isSome != null) {
+				cs.add(alwaysIfVar(e.some(), isVar));
+				ps.add(old.isSome);
+			}
+			for (int i = 0; i < cs.size(); i++) {
+				trackConstraint(constraints, cs.get(i), ps.get(i), ConstraintOrigin.SIG_ATTRIBUTE);
+				if (pm.inV1()) {
+					c1 = c1.and(cs.get(i));
+				} else {
+					c2 = c2.and(cs.get(i));
+				}
+			}
+		}
+		pendingParentMultiplicities.clear();
+	}
+
+	/**
+	 * Removes lone/one/some from merged attributes. Used for merged signatures
+	 * that have sub-signatures in at least one version: the merged signature is
+	 * flat, so a multiplicity attribute on it would restrict only the atoms that
+	 * are not in a sub-signature. The multiplicities are enforced in c1/c2
+	 * instead.
+	 */
+	private Attr[] withoutMultiplicities(Attr[] attrs) {
+		List<Attr> res = new ArrayList<>();
+		for (Attr a : attrs) {
+			if (a != null && (a.type == Attr.AttrType.LONE || a.type == Attr.AttrType.ONE
+					|| a.type == Attr.AttrType.SOME)) {
+				continue;
+			}
+			res.add(a);
+		}
+		return res.toArray(new Attr[0]);
 	}
 
 	/**

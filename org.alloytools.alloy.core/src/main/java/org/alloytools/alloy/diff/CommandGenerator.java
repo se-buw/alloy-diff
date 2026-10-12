@@ -1,5 +1,6 @@
 package org.alloytools.alloy.diff;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 
@@ -8,8 +9,11 @@ import edu.mit.csail.sdg.alloy4.Pos;
 import edu.mit.csail.sdg.alloy4.Util;
 import edu.mit.csail.sdg.ast.Command;
 import edu.mit.csail.sdg.ast.CommandScope;
+import edu.mit.csail.sdg.ast.Decl;
 import edu.mit.csail.sdg.ast.Expr;
 import edu.mit.csail.sdg.ast.ExprConstant;
+import edu.mit.csail.sdg.ast.ExprQt;
+import edu.mit.csail.sdg.ast.ExprUnary;
 import edu.mit.csail.sdg.ast.Module;
 import edu.mit.csail.sdg.ast.Sig;
 import edu.mit.csail.sdg.translator.A4Options;
@@ -30,7 +34,11 @@ public class CommandGenerator {
 	 * @param v2
 	 * @param scope    the maximum scope for comparison (might be overriden by Alloy
 	 *                 due to inheitance), if withPred==true the scope will be
-	 *                 overriden by min(manual scope, default scope)
+	 *                 overriden by min(manual scope, default scope).
+	 *                 -1 means: no explicit maximum. If withPred==true the scopes
+	 *                 of the original commands are used as they are (as the
+	 *                 Alloy Analyzer would use them for each model); otherwise
+	 *                 Alloy's default scope of 3 is used.
 	 * @param withPred take the predicate of the first command into account
 	 *                 (otherwise only signatures and facts but ignores original
 	 *                 command)
@@ -44,9 +52,6 @@ public class CommandGenerator {
 
 		Command cmd1 = (cmdIndex1 >= 0 && v1.getAllCommands().size() > cmdIndex1) ? v1.getAllCommands().get(cmdIndex1) : null;
 		Command cmd2 = (cmdIndex2 >= 0 && v2.getAllCommands().size() > cmdIndex2) ? v2.getAllCommands().get(cmdIndex2) : null;
-
-		int bitwidth = 0;
-		int maxInt = m.maxInt;
 
 		Expr c1 = null;
 		Expr c2 = null;
@@ -68,6 +73,22 @@ public class CommandGenerator {
 			c2 = m.c2.and(facts2);
 		}
 
+		// Use the bitwidth Alloy uses for the original command(s): the bitwidth given
+		// in the command (e.g. "for 3 but 6 Int") or Alloy's default otherwise.
+		// Integer literals of the models are then interpreted (including overflow)
+		// exactly as Alloy interprets them for the original models. The bitwidth is
+		// only increased if needed to represent the scope bounds that are added as
+		// cardinality constraints below (largest bound in maxInt).
+		// (Previously the bitwidth started at 0 and only took the literals of
+		// signature facts and field bounds into account, but not those of facts and
+		// command predicates, which led to overflows that Alloy would not have.)
+		int maxInt = 0;
+		int bitwidth = Math.max(originalBitwidth(withPred ? cmd1 : null), originalBitwidth(withPred ? cmd2 : null));
+
+		// scope -1: no maximum is requested, the scopes of the original commands are
+		// used as they are (previously -1 silently became a maximum of 3, so e.g. a
+		// "for 5" command was compared at scope 3)
+		boolean capScopes = scope != -1;
 		if (scope == -1) {
 			scope = 3;
 		}
@@ -94,15 +115,22 @@ public class CommandGenerator {
 		if (!withPred) {
 			sc1orig = sc1;
 			sc2orig = sc2;
+		} else if (!capScopes) {
+			// no maximum: min(sc, sc_orig) below must be the scope of the original
+			// command (the default scope of 3 applies to a version without command)
+			sc1 = sc1orig;
+			sc2 = sc2orig;
 		}
 
 		// restrict union of children to scope of parent in v1
 		for (Sig parent : m.v1iu.getParentSigs()) {
 			Expr union = null;
 			int ones = 0;
+			boolean mutableUnion = false;
 			for (Sig child : m.v1iu.getSubSigs(parent)) {
 				Sig s = m.sigs.get(child.label);
 				if (s != null) {
+					mutableUnion |= s.isVariable != null;
 					// ones override the default scope (important for enums!)
 					if (s.isOne != null) {
 						ones++;
@@ -118,6 +146,7 @@ public class CommandGenerator {
 				Sig p = m.sigs.get(parent.label);
 				if (p != null) {
 					union = union.plus(p);
+					mutableUnion |= p.isVariable != null;
 				}
 
 				int scopeInOrig = Math.min(sc1.sig2scope(parent), sc1orig.sig2scope(parent));
@@ -125,7 +154,7 @@ public class CommandGenerator {
 				if (sc1orig.isExact(parent) || (cmd1 != null && cmd1.additionalExactScopes.contains(parent))) {
 					scopeConstraint = union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
 				} else {
-					scopeConstraint = union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
+					scopeConstraint = atMost(union, Math.max(ones, scopeInOrig), mutableUnion);
 				}
 				m.trackConstraint(m.c1Constraints, scopeConstraint, scopePos(cmd1, parent), ConstraintOrigin.SCOPE_BOUND);
 				c1 = c1.and(scopeConstraint);
@@ -136,9 +165,11 @@ public class CommandGenerator {
 		for (Sig parent : m.v2iu.getParentSigs()) {
 			Expr union = null;
 			int ones = 0;
+			boolean mutableUnion = false;
 			for (Sig child : m.v2iu.getSubSigs(parent)) {
 				Sig s = m.sigs.get(child.label);
 				if (s != null) {
+					mutableUnion |= s.isVariable != null;
 					// ones override the default scope (important for enums!)
 					if (s.isOne != null) {
 						ones++;
@@ -154,6 +185,7 @@ public class CommandGenerator {
 				Sig p = m.sigs.get(parent.label);
 				if (p != null) {
 					union = union.plus(p);
+					mutableUnion |= p.isVariable != null;
 				}
 
 				int scopeInOrig = Math.min(sc2.sig2scope(parent), sc2orig.sig2scope(parent));
@@ -161,10 +193,11 @@ public class CommandGenerator {
 				if (sc2orig.isExact(parent) || (cmd2 != null && cmd2.additionalExactScopes.contains(parent))) {
 					scopeConstraint = union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
 				} else {
-					scopeConstraint = union.cardinality().lte(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
+					scopeConstraint = atMost(union, Math.max(ones, scopeInOrig), mutableUnion);
 				}
 				m.trackConstraint(m.c2Constraints, scopeConstraint, scopePos(cmd2, parent), ConstraintOrigin.SCOPE_BOUND);
 				c2 = c2.and(scopeConstraint);
+				maxInt = Math.max(maxInt, Math.max(ones, scopeInOrig));
 			}
 
 		}
@@ -175,7 +208,8 @@ public class CommandGenerator {
 		for (Sig s : m.v2Sigs.values()) {
 			maxInt = Math.max(maxInt, sc2.sig2scope(s));
 		}
-		while (maxInt > Util.max(bitwidth)) {
+		// 30 is the largest bitwidth Alloy accepts
+		while (maxInt > Util.max(bitwidth) && bitwidth < 30) {
 			bitwidth++;
 		}
 
@@ -202,33 +236,43 @@ public class CommandGenerator {
 				exact2 |= sc2orig.isExact(s2);
 			}
 
+			// Merged signatures are flat: for a signature with sub-signatures the scope
+			// of the original module bounds the signature *together with* its
+			// sub-signatures. That bound is already enforced by the
+			// "union of children" constraints above. Bounding the flat merged
+			// signature exactly would additionally force all sub-signatures to be
+			// empty, so for such signatures the merged scope is only an upper bound
+			// and no per-signature cardinality constraint is added.
+			boolean hasSubSigs1 = s1 != null && m.v1iu.getSubSigs(s1) != null && !m.v1iu.getSubSigs(s1).isEmpty();
+			boolean hasSubSigs2 = s2 != null && m.v2iu.getSubSigs(s2) != null && !m.v2iu.getSubSigs(s2).isEmpty();
+
 			if (Math.max(scope1, scope2) >= 1) {
 				// note that 0 can be computed if scope is too small for all subsignatures
 				// however, if we restrict it, Alloy complains with an error
-				cmd = cmd.change(s, exact1 && exact2, Math.max(scope1, scope2));
+				cmd = cmd.change(s, exact1 && exact2 && !hasSubSigs1 && !hasSubSigs2, Math.max(scope1, scope2));
 			}
 			// explicitly embed cardinality constraints to respect model scopes
-			if (s1 != null && scope1 != -1) {
+			if (s1 != null && scope1 != -1 && !hasSubSigs1) {
 				if (exact1) {
 					Expr sc = s.cardinality().equal(ExprConstant.makeNUMBER(scope1));
 					m.trackConstraint(m.c1Constraints, sc, scopePos(cmd1, s1), ConstraintOrigin.SCOPE_BOUND);
 					c1 = c1.and(sc);
 					changed = true;
 				} else if (scope2 != -1 && scope1 < scope2) {
-					Expr sc = s.cardinality().lte(ExprConstant.makeNUMBER(scope1));
+					Expr sc = atMost(s, scope1, s.isVariable != null);
 					m.trackConstraint(m.c1Constraints, sc, scopePos(cmd1, s1), ConstraintOrigin.SCOPE_BOUND);
 					c1 = c1.and(sc);
 					changed = true;
 				}
 			}
-			if (s2 != null && scope2 != -1) {
+			if (s2 != null && scope2 != -1 && !hasSubSigs2) {
 				if (exact2) {
 					Expr sc = s.cardinality().equal(ExprConstant.makeNUMBER(scope2));
 					m.trackConstraint(m.c2Constraints, sc, scopePos(cmd2, s2), ConstraintOrigin.SCOPE_BOUND);
 					c2 = c2.and(sc);
 					changed = true;
 				} else if (scope1 != -1 && scope2 < scope1) {
-					Expr sc = s.cardinality().lte(ExprConstant.makeNUMBER(scope2));
+					Expr sc = atMost(s, scope2, s.isVariable != null);
 					m.trackConstraint(m.c2Constraints, sc, scopePos(cmd2, s2), ConstraintOrigin.SCOPE_BOUND);
 					c2 = c2.and(sc);
 					changed = true;
@@ -272,6 +316,62 @@ public class CommandGenerator {
 			result = (result == null) ? rewritten : result.and(rewritten);
 		}
 		return result == null ? ExprConstant.TRUE : result;
+	}
+
+	/**
+	 * The scope bound "at most k atoms" for expression {@code e} (a signature or a
+	 * union of signatures) of one version.
+	 * <p>
+	 * For a mutable expression the scope bounds the atoms that are in {@code e} in
+	 * <em>any</em> state of the trace, not only in the first one: in Alloy the
+	 * scope of a var sig bounds the pool of atoms the sig may use over time. "#e
+	 * &lt;= k" would only constrain the first state. The bound is expressed as
+	 * "there are no k+1 distinct atoms that are each in e at some state":
+	 *
+	 * <pre>
+	 * not eventually (some x1: e | eventually (some x2: e - x1 | ... eventually some (e - x1 - ... - xk)))
+	 * </pre>
+	 *
+	 * Picking the atoms in the order of a state in which each of them is in e,
+	 * nested "eventually" (which includes the current state) suffices; quantified
+	 * variables are rigid, i.e., denote the same atom in all states.
+	 *
+	 * @param mutable whether {@code e} may change over time
+	 */
+	static Expr atMost(Expr e, int k, boolean mutable) {
+		if (!mutable) {
+			return e.cardinality().lte(ExprConstant.makeNUMBER(k));
+		}
+		List<Decl> decls = new ArrayList<>();
+		Expr dom = e;
+		for (int i = 1; i <= k; i++) {
+			Decl d = dom.oneOf("scope_x" + i);
+			decls.add(d);
+			dom = dom.minus(d.get());
+		}
+		Expr body = ExprUnary.Op.EVENTUALLY.make(null, dom.some());
+		for (int i = k - 1; i >= 0; i--) {
+			body = ExprUnary.Op.EVENTUALLY.make(null, ExprQt.Op.SOME.make(null, null, List.of(decls.get(i)), body));
+		}
+		return body.not();
+	}
+
+	/**
+	 * Alloy's integer bitwidth when a command does not specify one (see
+	 * ScopeComputer).
+	 */
+	static final int DEFAULT_BITWIDTH = 4;
+
+	/**
+	 * The bitwidth Alloy uses when solving {@code cmd} on its own module: the
+	 * bitwidth given in the command, or {@link #DEFAULT_BITWIDTH} if the command
+	 * does not set one (or there is no command).
+	 */
+	static int originalBitwidth(Command cmd) {
+		if (cmd != null && cmd.bitwidth >= 0) {
+			return cmd.bitwidth;
+		}
+		return DEFAULT_BITWIDTH;
 	}
 
 	/**
