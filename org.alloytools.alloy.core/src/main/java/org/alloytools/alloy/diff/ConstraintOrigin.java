@@ -12,6 +12,8 @@ public enum ConstraintOrigin {
 	FIELD_MULTIPLICITY,
 	/** Frame condition for a field that became variable */
 	FIELD_FRAME,
+	/** Disjointness of fields declared with disj (disj f, g: e or f: disj e) */
+	FIELD_DISJOINT,
 	/** User-defined signature fact */
 	SIG_FACT,
 	/** Closed-world constraint (sig.no() when sig is absent in one version) */

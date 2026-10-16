@@ -350,7 +350,70 @@ public class ModuleMerger {
 		addSignatureFacts(v1, true);
 		addSignatureFacts(v2, false);
 
+		// disj in field declarations (not part of the field's bound expression)
+		addDisjointFieldConstraints(v1, true);
+		addDisjointFieldConstraints(v2, false);
+
 		return sigs.values();
+	}
+
+	/**
+	 * Adds the constraints of {@code disj} in field declarations of one version to
+	 * c1 (inV1) or c2, as Alloy does in TranslateAlloyToKodkod (declarations of
+	 * the fields of a signature):
+	 * <ul>
+	 * <li>{@code sig S { f: disj e }}: the values of f are disjoint for different
+	 * atoms, {@code all a, b: S | a != b implies no a.f & b.f} (not added for
+	 * {@code one} signatures, as in Alloy)</li>
+	 * <li>{@code sig S { disj f, g: e }}: the fields are pairwise disjoint,
+	 * {@code no f & g}</li>
+	 * </ul>
+	 * The constraints are built over the original signatures and fields and then
+	 * translated with {@link #replaceSigRefs(Expr, boolean)}. This replaces S by
+	 * its inheritance expression (S and its sub-signatures) and f by the union of
+	 * its copies, exactly as for facts. As in Alloy, the constraints hold in every
+	 * state if the field is declared {@code var}, and in the initial state
+	 * otherwise. (Previously, {@code disj} was dropped, so c1/c2 allowed instances
+	 * that violate it.)
+	 */
+	private void addDisjointFieldConstraints(Module orig, boolean inV1) {
+		List<ConstraintInfo> constraints = inV1 ? c1Constraints : c2Constraints;
+		for (Sig os : orig.getAllReachableUserDefinedSigs()) {
+			for (Decl d : os.getFieldDecls()) {
+				List<Expr> cs = new ArrayList<>();
+				List<Pos> ps = new ArrayList<>();
+				if (os.isOne == null && d.disjoint2 != null) {
+					for (ExprHasName n : d.names) {
+						Decl a = os.oneOf("disj_a");
+						Decl b = os.oneOf("disj_b");
+						Expr body = a.get().equal(b.get()).not()
+								.implies(a.get().join(n).intersect(b.get().join(n)).no());
+						cs.add(ExprQt.Op.ALL.make(n.pos, null, List.of(a, b), body));
+						ps.add(n.pos);
+					}
+				}
+				if (d.names.size() > 1 && d.disjoint != null) {
+					for (int i = 0; i < d.names.size(); i++) {
+						for (int j = i + 1; j < d.names.size(); j++) {
+							cs.add(d.names.get(i).intersect(d.names.get(j)).no());
+							ps.add(d.names.get(i).pos.merge(d.names.get(j).pos));
+						}
+					}
+				}
+				for (int k = 0; k < cs.size(); k++) {
+					Expr c = replaceSigRefs(cs.get(k), inV1);
+					if (d.isVar != null) {
+						c = ExprUnary.Op.ALWAYS.make(null, c);
+					}
+					trackConstraint(constraints, c, ps.get(k), ConstraintOrigin.FIELD_DISJOINT);
+					if (inV1) {
+						c1 = c1.and(c);
+					} else {
+						c2 = c2.and(c);
+					}
+				}
+			}
+		}
 	}
 
 	/**
@@ -1674,16 +1737,67 @@ public class ModuleMerger {
 			for (Attr a2 : s2.attributes) {
 				if (a1 != null && a2 != null && a1.type.equals(a2.type)) {
 					// don't add EXACT attributes (if the parents are different, then EXACT would be wrong)
-					if (!Attr.AttrType.EXACT.equals(a1.type)) {
+					// multiplicities are added below as their least upper bound
+					if (!Attr.AttrType.EXACT.equals(a1.type) && !isMultiplicity(a1.type)) {
 						attrs.add(a1.type.make(a1.pos));
 					}
 				}
 			}
 		}
+		// least upper bound of the multiplicities (Fig. "Partial order of Alloy
+		// multiplicities"), e.g., one and lone -> lone, one and some -> some, lone and
+		// some -> set. The original multiplicities are added to c1/c2 by
+		// generateSigAttributeConstraints(..). (Previously only a multiplicity that
+		// is the same in both versions was kept, e.g., one and lone -> set.)
+		Attr.AttrType mult = leastUpperBound(multiplicity(s1), multiplicity(s2));
+		if (mult != null) {
+			attrs.add(mult.make(null));
+		}
 		if ((s1.isVariable != null || s2.isVariable != null) && !containsVariable(attrs)) {
 			attrs.add(Attr.AttrType.VARIABLE.make(null));
 		}
 		return attrs.toArray(new Attr[] {});
+	}
+
+	private static boolean isMultiplicity(Attr.AttrType t) {
+		return t == Attr.AttrType.LONE || t == Attr.AttrType.ONE || t == Attr.AttrType.SOME;
+	}
+
+	/**
+	 * The multiplicity of a signature: ONE, LONE, SOME, or null for set.
+	 */
+	private static Attr.AttrType multiplicity(Sig s) {
+		if (s.isOne != null) {
+			return Attr.AttrType.ONE;
+		}
+		if (s.isLone != null) {
+			return Attr.AttrType.LONE;
+		}
+		if (s.isSome != null) {
+			return Attr.AttrType.SOME;
+		}
+		return null;
+	}
+
+	/**
+	 * Least upper bound of two signature multiplicities (null denotes set):
+	 * one &lt;= lone &lt;= set and one &lt;= some &lt;= set.
+	 */
+	static Attr.AttrType leastUpperBound(Attr.AttrType m1, Attr.AttrType m2) {
+		if (m1 == null || m2 == null) {
+			return null;
+		}
+		if (m1 == m2) {
+			return m1;
+		}
+		if (m1 == Attr.AttrType.ONE) {
+			return m2;
+		}
+		if (m2 == Attr.AttrType.ONE) {
+			return m1;
+		}
+		// lone and some
+		return null;
 	}
 
 	private boolean containsVariable(List<Attr> attrs) {

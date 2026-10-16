@@ -16,6 +16,7 @@ import edu.mit.csail.sdg.ast.ExprQt;
 import edu.mit.csail.sdg.ast.ExprUnary;
 import edu.mit.csail.sdg.ast.Module;
 import edu.mit.csail.sdg.ast.Sig;
+import edu.mit.csail.sdg.parser.CompUtil;
 import edu.mit.csail.sdg.translator.A4Options;
 import edu.mit.csail.sdg.translator.MyScopeComputer;
 
@@ -94,20 +95,33 @@ public class CommandGenerator {
 		}
 
 		int maxseq1 = cmd1 != null ? cmd1.maxseq : -1;
-		int minprefix1 = cmd1 != null ? cmd1.minprefix : -1;
-		int maxprefix1 = cmd1 != null ? cmd1.maxprefix : -1;
-
 		int maxseq2 = cmd2 != null ? cmd2.maxseq : -1;
-		int minprefix2 = cmd2 != null ? cmd2.minprefix : -1;
-		int maxprefix2 = cmd2 != null ? cmd2.maxprefix : -1;
-
 		int maxseq = Math.max(maxseq1, maxseq2);
-		int minprefix = Math.max(minprefix1, minprefix2);
-		int maxprefix = Math.max(maxprefix1, maxprefix2);
+
+		// Steps (lengths of lasso traces), as Alloy's ScopeComputer computes them for
+		// each version on its own: a version that is not temporal has no steps, and a
+		// temporal version without a steps scope uses 1..10 steps. As for scopes and
+		// bitwidth, the steps of the selected commands are only used with withPred.
+		// (Previously the maxima of cmd1.maxprefix/cmd2.maxprefix were taken, so a
+		// version without a steps scope (default 10) was analyzed with the smaller
+		// steps scope of the other version.)
+		boolean temporal1 = isTemporalVersion(v1, m.v1Sigs.values(), cmd1);
+		boolean temporal2 = isTemporalVersion(v2, m.v2Sigs.values(), cmd2);
+		int maxSteps1 = maxSteps(temporal1, withPred ? cmd1 : null);
+		int maxSteps2 = maxSteps(temporal2, withPred ? cmd2 : null);
+		int minSteps1 = minSteps(temporal1, withPred ? cmd1 : null, maxSteps1);
+		int minSteps2 = minSteps(temporal2, withPred ? cmd2 : null, maxSteps2);
+		// -1 if neither version is temporal
+		int maxprefix = Math.max(maxSteps1, maxSteps2);
+		int minprefix = Math.max(minSteps1, minSteps2);
 		
 		edu.mit.csail.sdg.ast.ExprVar commandKeyword = (cmd1 != null && cmd1.commandKeyword != null) ? cmd1.commandKeyword : ((cmd2 != null && cmd2.commandKeyword != null) ? cmd2.commandKeyword : edu.mit.csail.sdg.ast.ExprVar.make(null, "run"));
 
-		Command cmd4scope = new Command(edu.mit.csail.sdg.alloy4.Pos.UNKNOWN, ExprConstant.TRUE, "", false, scope, -1, maxseq, minprefix, maxprefix, -1, null, null, commandKeyword, ExprConstant.TRUE, null);
+		// The command for computing signature scopes carries no steps: signature
+		// scopes do not depend on steps, and Alloy rejects a steps scope for a
+		// version that is not temporal ("You cannot set a scope on steps in static
+		// models"), e.g., when a temporal version is compared with a static one.
+		Command cmd4scope = new Command(edu.mit.csail.sdg.alloy4.Pos.UNKNOWN, ExprConstant.TRUE, "", false, scope, -1, maxseq, -1, -1, -1, null, null, commandKeyword, ExprConstant.TRUE, null);
 		MyScopeComputer sc1 = MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v1Sigs.values(), cmd4scope);
 		MyScopeComputer sc1orig = cmd1 != null ? MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v1Sigs.values(), cmd1) : sc1;
 		MyScopeComputer sc2 = MyScopeComputer.compute(new A4Reporter(), new A4Options(), m.v2Sigs.values(), cmd4scope);
@@ -213,6 +227,24 @@ public class CommandGenerator {
 			bitwidth++;
 		}
 
+		// The merged command explores traces with up to maxprefix steps. A temporal
+		// version with a smaller maximum is restricted to the traces it has in Alloy,
+		// i.e., to traces that have a lasso with at most maxStepsX states.
+		if (temporal1 && maxSteps1 < maxprefix) {
+			Expr lb = lassoBound(mutableRelations(), maxSteps1);
+			if (lb != null) {
+				m.trackConstraint(m.c1Constraints, lb, cmd1 != null && cmd1.pos != null ? cmd1.pos : Pos.UNKNOWN, ConstraintOrigin.SCOPE_BOUND);
+				c1 = c1.and(lb);
+			}
+		}
+		if (temporal2 && maxSteps2 < maxprefix) {
+			Expr lb = lassoBound(mutableRelations(), maxSteps2);
+			if (lb != null) {
+				m.trackConstraint(m.c2Constraints, lb, cmd2 != null && cmd2.pos != null ? cmd2.pos : Pos.UNKNOWN, ConstraintOrigin.SCOPE_BOUND);
+				c2 = c2.and(lb);
+			}
+		}
+
 		Command cmd = new Command(edu.mit.csail.sdg.alloy4.Pos.UNKNOWN, getExpr(c1, c2, a), "", false, scope, bitwidth, maxseq, minprefix, maxprefix, -1, null, null, commandKeyword, getExpr(c1, c2, a), null);
 
 		boolean changed = false;
@@ -249,7 +281,10 @@ public class CommandGenerator {
 			if (Math.max(scope1, scope2) >= 1) {
 				// note that 0 can be computed if scope is too small for all subsignatures
 				// however, if we restrict it, Alloy complains with an error
-				cmd = cmd.change(s, exact1 && exact2 && !hasSubSigs1 && !hasSubSigs2, Math.max(scope1, scope2));
+				// exact in the merged command only if both versions have the same exact
+				// scope; otherwise, e.g., "exactly 3" vs "exactly 2", the version with
+				// the smaller scope could not be represented (its "#s = 2" is in c1/c2)
+				cmd = cmd.change(s, exact1 && exact2 && scope1 == scope2 && !hasSubSigs1 && !hasSubSigs2, Math.max(scope1, scope2));
 			}
 			// explicitly embed cardinality constraints to respect model scopes
 			if (s1 != null && scope1 != -1 && !hasSubSigs1) {
@@ -354,6 +389,121 @@ public class CommandGenerator {
 			body = ExprUnary.Op.EVENTUALLY.make(null, ExprQt.Op.SOME.make(null, null, List.of(decls.get(i)), body));
 		}
 		return body.not();
+	}
+
+	/**
+	 * Alloy's maximum number of steps when a temporal command does not specify
+	 * one (see ScopeComputer).
+	 */
+	static final int DEFAULT_MAX_STEPS = 10;
+
+	/**
+	 * True if a version is temporal in the sense of Alloy
+	 * (CompUtil.isTemporalModel): it has a mutable signature or field, or its
+	 * command (or, without command, its facts) uses a temporal operator.
+	 */
+	static boolean isTemporalVersion(Module v, Iterable<Sig> sigs, Command cmd) {
+		if (cmd != null) {
+			return CompUtil.isTemporalModel(sigs, cmd);
+		}
+		for (Sig s : sigs) {
+			if (s.isVariable != null) {
+				return true;
+			}
+			for (Sig.Field f : s.getFields()) {
+				if (f.isVariable != null) {
+					return true;
+				}
+			}
+		}
+		return v.getAllReachableFacts().hasTemporal();
+	}
+
+	/**
+	 * The maximum number of steps Alloy uses for a version: -1 if it is not
+	 * temporal, the steps scope of the command, or the default of 10.
+	 */
+	static int maxSteps(boolean temporal, Command cmd) {
+		if (!temporal) {
+			return -1;
+		}
+		if (cmd != null && cmd.maxprefix >= 1) {
+			return cmd.maxprefix;
+		}
+		return DEFAULT_MAX_STEPS;
+	}
+
+	/**
+	 * The minimum number of steps Alloy uses for a version: -1 if it is not
+	 * temporal, the minimum of the steps scope (at most the maximum), or 1.
+	 */
+	static int minSteps(boolean temporal, Command cmd, int maxSteps) {
+		if (!temporal) {
+			return -1;
+		}
+		if (cmd != null && cmd.minprefix >= 1) {
+			return Math.min(cmd.minprefix, maxSteps);
+		}
+		return 1;
+	}
+
+	/**
+	 * The mutable signatures and fields of the merged module.
+	 */
+	private List<Expr> mutableRelations() {
+		List<Expr> rels = new ArrayList<>();
+		for (Sig s : m.sigs.values()) {
+			if (s.isVariable != null) {
+				rels.add(s);
+			}
+			for (Sig.Field f : s.getFields()) {
+				if (f.isVariable != null) {
+					rels.add(f);
+				}
+			}
+		}
+		return rels;
+	}
+
+	/**
+	 * A trace has a lasso with at most n states iff for some period p (1 &lt;= p
+	 * &lt;= n) it repeats with period p from state n - p on:
+	 *
+	 * <pre>
+	 * (after)^(n-1) always (R' = R)  or  (after)^(n-2) always (R'' = R)  or ...  or  always (R'...' = R)
+	 * </pre>
+	 *
+	 * for all mutable relations R (with p primes). Static relations have the same
+	 * value in all states. A lasso with prefix l and period p, l + p &lt;= n, also
+	 * repeats with period p from state n - p &gt;= l on, and a trace that repeats
+	 * with period p from state n - p on has a lasso with n states. Alloy's "n
+	 * steps" counts the transitions including the looping one, i.e., the states of
+	 * the lasso.
+	 *
+	 * @return the formula or null if there are no mutable relations
+	 */
+	static Expr lassoBound(List<Expr> rels, int n) {
+		if (rels.isEmpty() || n < 1) {
+			return null;
+		}
+		Expr res = null;
+		for (int p = 1; p <= n; p++) {
+			Expr eq = null;
+			for (Expr r : rels) {
+				Expr shifted = r;
+				for (int i = 0; i < p; i++) {
+					shifted = ExprUnary.Op.PRIME.make(null, shifted);
+				}
+				Expr e = shifted.equal(r);
+				eq = (eq == null) ? e : eq.and(e);
+			}
+			Expr periodic = ExprUnary.Op.ALWAYS.make(null, eq);
+			for (int i = 0; i < n - p; i++) {
+				periodic = ExprUnary.Op.AFTER.make(null, periodic);
+			}
+			res = (res == null) ? periodic : res.or(periodic);
+		}
+		return res;
 	}
 
 	/**
