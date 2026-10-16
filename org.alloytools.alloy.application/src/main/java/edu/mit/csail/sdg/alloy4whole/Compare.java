@@ -206,6 +206,7 @@ public class Compare {
 		case SIG_HIERARCHY:      return "Sig hierarchy";
 		case FIELD_MULTIPLICITY: return "Field multiplicity";
 		case FIELD_FRAME:        return "Field frame condition";
+		case FIELD_DISJOINT:     return "Disjoint fields";
 		case SIG_FACT:           return "Sig fact";
 		case CLOSED_WORLD:       return "Closed-world assumption";
 		case FACT:               return "Fact";
