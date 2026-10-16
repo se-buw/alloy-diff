@@ -281,20 +281,9 @@ public class ModuleMerger {
 						}
 						c1 = generateSigAttributeConstraints(sub, s1, v1iu, c1, c1Constraints);
 						
-						for (Attr attr : s1.attributes) {
-						if (attr != null && attr.type == Attr.AttrType.EXACT) {
-								// make sub equal to ps1 union (sigs in v1)
-								{ Expr cw = alwaysIfVar(sub.equal(makePlus(ps1)), sub.isVariable != null); trackConstraint(c1Constraints, cw, ConstraintOrigin.SIG_HIERARCHY); c1 = c1.and(cw); }
-							}
-						}
+						// EXACT (sig S = ...) is enforced in restoreSubSetSigHierarchy(..)
 						
 						c2 = generateSigAttributeConstraints(sub, s2, v2iu, c2, c2Constraints);
-						for (Attr attr : s2.attributes) {
-						if (attr != null && attr.type == Attr.AttrType.EXACT) {
-								// make sub equal to ps1 union (sigs in v1)
-								{ Expr cw = alwaysIfVar(sub.equal(makePlus(ps2)), sub.isVariable != null); trackConstraint(c2Constraints, cw, ConstraintOrigin.SIG_HIERARCHY); c2 = c2.and(cw); }
-							}
-						}
 					} else {
 						throw new RuntimeException("Cannot merge PrimSig and SubsetSig with same name: " + s1.label);
 					}
@@ -454,7 +443,10 @@ public class ModuleMerger {
 				}
 				if (resolved && parentUnion != null) {
 					Sig c = sigs.get(sub.label);
-					Expr constraint = alwaysIfVar(c.in(parentUnion), c.isVariable != null);
+					// sig S = P1 + ... + Pn (EXACT): S equals the union of its original
+					// parents. (Previously S was set equal to the flattened type-signature
+					// parents, e.g., S = A for "sig T in A" and "sig S = T".)
+					Expr constraint = alwaysIfVar(sub.exact ? c.equal(parentUnion) : c.in(parentUnion), c.isVariable != null);
 					trackConstraint(constraints, constraint, ConstraintOrigin.SIG_HIERARCHY);
 					cOld = cOld.and(constraint);
 				}
@@ -514,15 +506,8 @@ public class ModuleMerger {
 			trackConstraint(ownerConstraints, constraint, ConstraintOrigin.SIG_ATTRIBUTE);
 			c1 = c1.and(constraint);
 		}
-		// EXACT is not added to unique SubsetSigs, but enforced here
-		for (Attr attr : oldSig.attributes) {
-			if (attr != null && attr.type == Attr.AttrType.EXACT) {
-				// make sub equal to ps1 union (sigs in v1)
-				Expr constraint = alwaysIfVar(subV1.equal(makePlus(newParents)), subV1.isVariable != null);
-				trackConstraint(ownerConstraints, constraint, ConstraintOrigin.SIG_HIERARCHY);
-				c1 = c1.and(constraint);
-			}
-		}
+		// EXACT is not added to unique SubsetSigs, but enforced in
+		// restoreSubSetSigHierarchy(..)
 		
 		Expr cwConstraint = alwaysIfVar(subV1.no(), subV1.isVariable != null);
 		trackConstraint(otherConstraints, cwConstraint, ConstraintOrigin.CLOSED_WORLD);
@@ -923,9 +908,15 @@ public class ModuleMerger {
 
 		if (f1 != null && f2 != null) { // field is in both versions
 			Pos isVar = (f1.isVariable != null ? f1.isVariable : f2.isVariable);
-			if (f1.decl().expr instanceof ExprUnary && f2.decl().expr instanceof ExprUnary) { // unary fields
-				ExprUnary e1 = (ExprUnary) replaceSigRefs(f1.decl().expr, names, true);
-				ExprUnary e2 = (ExprUnary) replaceSigRefs(f2.decl().expr, names, false);
+			// Dispatch on the arity of the field, not on the syntax of the declaration:
+			// e.g., "f: A -> B" (ExprBinary) and "f: set A -> B" (ExprUnary) are both
+			// binary. (Previously the AST class decided, and such pairs failed with
+			// "Mix of field arities".)
+			int arity1 = f1.decl().expr.type().arity();
+			int arity2 = f2.decl().expr.type().arity();
+			if (arity1 == 1 && arity2 == 1) { // unary fields
+				ExprUnary e1 = asUnaryDecl(replaceSigRefs(f1.decl().expr, names, true));
+				ExprUnary e2 = asUnaryDecl(replaceSigRefs(f2.decl().expr, names, false));
 				
 				Expr union = e1.sub.isSame(e2.sub) ? e1.sub : e1.sub.plus(e2.sub);
 				ExprUnary.Op op = getMergeOp(e1.op, e2.op);
@@ -961,7 +952,7 @@ public class ModuleMerger {
 					// Expr frameBody2 = ExprUnary.Op.ALWAYS.make(null, ExprBinary.Op.EQUALS.make(null, null, ExprUnary.Op.PRIME.make(null, ths.get().join(f)), ths.get().join(f)));
 					{ Expr fc = fieldFrame(f); trackConstraint(c2Constraints, fc, f2.pos, ConstraintOrigin.FIELD_FRAME); c2 = c2.and(fc); }
 				}
-			} else if (f1.decl().expr instanceof ExprBinary && f2.decl().expr instanceof ExprBinary) { // relational
+			} else if (arity1 > 1 && arity2 > 1 && arity1 == arity2) { // relational
 																										// fields
 				Expr e1 = replaceSigRefs(f1.decl().expr, names, true);
 				Expr e2 = replaceSigRefs(f2.decl().expr, names, false);
@@ -975,9 +966,13 @@ public class ModuleMerger {
 						// a field of a SubsetSig is empty for atoms outside the SubsetSig;
 						// arrow multiplicities in the declaration would contradict that.
 						// They are enforced in c1/c2 below (only for atoms in the SubsetSig).
-						f = mergedSig.addField(f1.label, replaceArrows(e1), isVar);
+						f = mergedSig.addField(f1.label, replaceArrows(relationOf(e1)), isVar);
 					} else {
-						Expr union = replaceArrows(e1).plus(replaceArrows(e2));
+						// "set A -> B" is declared as "A -> B" (Alloy allows only "set" in
+						// front of a relation of arity > 1; it adds no constraint)
+						Expr r1 = replaceArrows(relationOf(e1));
+						Expr r2 = replaceArrows(relationOf(e2));
+						Expr union = r1.isSame(r2) ? r1 : r1.plus(r2);
 						f = mergedSig.addField(f1.label, union, isVar);
 					}
 				}
@@ -1013,6 +1008,48 @@ public class ModuleMerger {
 		} else if (f2 != null) {
 			addUniqueField(mergedSig, f2, false);
 		}
+	}
+
+	/**
+	 * The declaration expression of a unary field as a multiplicity expression.
+	 * Alloy's parser declares a unary field with a multiplicity (one by default);
+	 * other unary expressions are read as "one e", as in Alloy.
+	 */
+	private static ExprUnary asUnaryDecl(Expr e) {
+		if (e instanceof ExprUnary) {
+			ExprUnary u = (ExprUnary) e;
+			switch (u.op) {
+			case SETOF:
+			case LONEOF:
+			case ONEOF:
+			case SOMEOF:
+				return u;
+			default:
+				break;
+			}
+		}
+		return (ExprUnary) ExprUnary.Op.ONEOF.make(e.pos, e);
+	}
+
+	/**
+	 * The relation of a declaration of arity > 1 without a leading multiplicity,
+	 * e.g., "A -> B" for "set A -> B". (Alloy rejects lone/one/some in front of a
+	 * relation of arity > 1; they are handled the same way for robustness.)
+	 */
+	private static Expr relationOf(Expr e) {
+		if (e instanceof ExprUnary) {
+			ExprUnary u = (ExprUnary) e;
+			switch (u.op) {
+			case SETOF:
+			case LONEOF:
+			case ONEOF:
+			case SOMEOF:
+				return u.sub;
+			default:
+				break;
+			}
+		}
+		return e;
 	}
 
 	/**
@@ -1581,8 +1618,20 @@ public class ModuleMerger {
 	 * @param c
 	 * @return
 	 */
+	/**
+	 * A constraint implied by a declaration holds in every state of a trace. As in
+	 * Alloy (TranslateAlloyToKodkod: TemporalTranslator.isTemporal on the
+	 * declaration formula), the constraint is wrapped in always if it is temporal,
+	 * i.e., refers to a mutable signature or field of the merged module or uses a
+	 * temporal operator. A relation that is mutable only in the merged module is
+	 * kept constant in the respective version by a frame condition, so always c is
+	 * then equivalent to c. {@code isVar} is kept for callers that know that the
+	 * constrained signature or field is mutable. (Previously only {@code isVar}
+	 * was checked, e.g., for "f: set S" with "var sig S" the declaration only
+	 * constrained the first state.)
+	 */
 	private Expr alwaysIfVar(Expr e, boolean isVar) {
-		if (isVar) {
+		if (isVar || isTemporal(e)) {
 			return ExprUnary.Op.ALWAYS.make(null, e);
 		}
 		return e;

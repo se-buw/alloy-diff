@@ -79,11 +79,10 @@ public class CommandGenerator {
 		// Integer literals of the models are then interpreted (including overflow)
 		// exactly as Alloy interprets them for the original models. The bitwidth is
 		// only increased if needed to represent the scope bounds that are added as
-		// cardinality constraints below (largest bound in maxInt).
+		// cardinality constraints below (see cardBound(..)).
 		// (Previously the bitwidth started at 0 and only took the literals of
 		// signature facts and field bounds into account, but not those of facts and
 		// command predicates, which led to overflows that Alloy would not have.)
-		int maxInt = 0;
 		int bitwidth = Math.max(originalBitwidth(withPred ? cmd1 : null), originalBitwidth(withPred ? cmd2 : null));
 
 		// scope -1: no maximum is requested, the scopes of the original commands are
@@ -136,9 +135,27 @@ public class CommandGenerator {
 			sc2 = sc2orig;
 		}
 
+		// The largest number of atoms of a merged signature in T(v1, v2): its scope
+		// in the merged command below (the larger scope of the two versions, or the
+		// overall scope if neither version gives one). Used by cardBound(..).
+		final MyScopeComputer fsc1 = sc1, fsc1orig = sc1orig, fsc2 = sc2, fsc2orig = sc2orig;
+		final int overallScope = scope;
+		mergedScope = label -> {
+			Sig s1 = m.v1Sigs.get(label);
+			Sig s2 = m.v2Sigs.get(label);
+			int scope1 = s1 != null ? Math.min(fsc1.sig2scope(s1), fsc1orig.sig2scope(s1)) : -1;
+			int scope2 = s2 != null ? Math.min(fsc2.sig2scope(s2), fsc2orig.sig2scope(s2)) : -1;
+			int mx = Math.max(scope1, scope2);
+			return mx >= 1 ? mx : overallScope;
+		};
+		bitwidth0 = bitwidth;
+		needSigned = 0;
+		needUnsigned = 0;
+
 		// restrict union of children to scope of parent in v1
 		for (Sig parent : m.v1iu.getParentSigs()) {
 			Expr union = null;
+			List<Sig> comps = new ArrayList<>();
 			int ones = 0;
 			boolean mutableUnion = false;
 			for (Sig child : m.v1iu.getSubSigs(parent)) {
@@ -149,6 +166,7 @@ public class CommandGenerator {
 					if (s.isOne != null) {
 						ones++;
 					}
+					comps.add(s);
 					if (union == null) {
 						union = s;
 					} else {
@@ -159,6 +177,7 @@ public class CommandGenerator {
 			if (union != null) {
 				Sig p = m.sigs.get(parent.label);
 				if (p != null) {
+					comps.add(p);
 					union = union.plus(p);
 					mutableUnion |= p.isVariable != null;
 				}
@@ -166,18 +185,20 @@ public class CommandGenerator {
 				int scopeInOrig = Math.min(sc1.sig2scope(parent), sc1orig.sig2scope(parent));
 				Expr scopeConstraint;
 				if (sc1orig.isExact(parent) || (cmd1 != null && cmd1.additionalExactScopes.contains(parent))) {
-					scopeConstraint = union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
+					scopeConstraint = cardBound(comps, Math.max(ones, scopeInOrig), true);
+				} else if (mutableUnion) {
+					scopeConstraint = atMost(union, Math.max(ones, scopeInOrig), true);
 				} else {
-					scopeConstraint = atMost(union, Math.max(ones, scopeInOrig), mutableUnion);
+					scopeConstraint = cardBound(comps, Math.max(ones, scopeInOrig), false);
 				}
 				m.trackConstraint(m.c1Constraints, scopeConstraint, scopePos(cmd1, parent), ConstraintOrigin.SCOPE_BOUND);
 				c1 = c1.and(scopeConstraint);
-				maxInt = Math.max(maxInt, Math.max(ones, scopeInOrig));
 			}
 		}
 		// restrict union of children to scope of parent in v2
 		for (Sig parent : m.v2iu.getParentSigs()) {
 			Expr union = null;
+			List<Sig> comps = new ArrayList<>();
 			int ones = 0;
 			boolean mutableUnion = false;
 			for (Sig child : m.v2iu.getSubSigs(parent)) {
@@ -188,6 +209,7 @@ public class CommandGenerator {
 					if (s.isOne != null) {
 						ones++;
 					}
+					comps.add(s);
 					if (union == null) {
 						union = s;
 					} else {
@@ -198,6 +220,7 @@ public class CommandGenerator {
 			if (union != null) {
 				Sig p = m.sigs.get(parent.label);
 				if (p != null) {
+					comps.add(p);
 					union = union.plus(p);
 					mutableUnion |= p.isVariable != null;
 				}
@@ -205,27 +228,21 @@ public class CommandGenerator {
 				int scopeInOrig = Math.min(sc2.sig2scope(parent), sc2orig.sig2scope(parent));
 				Expr scopeConstraint;
 				if (sc2orig.isExact(parent) || (cmd2 != null && cmd2.additionalExactScopes.contains(parent))) {
-					scopeConstraint = union.cardinality().equal(ExprConstant.makeNUMBER(Math.max(ones, scopeInOrig)));
+					scopeConstraint = cardBound(comps, Math.max(ones, scopeInOrig), true);
+				} else if (mutableUnion) {
+					scopeConstraint = atMost(union, Math.max(ones, scopeInOrig), true);
 				} else {
-					scopeConstraint = atMost(union, Math.max(ones, scopeInOrig), mutableUnion);
+					scopeConstraint = cardBound(comps, Math.max(ones, scopeInOrig), false);
 				}
 				m.trackConstraint(m.c2Constraints, scopeConstraint, scopePos(cmd2, parent), ConstraintOrigin.SCOPE_BOUND);
 				c2 = c2.and(scopeConstraint);
-				maxInt = Math.max(maxInt, Math.max(ones, scopeInOrig));
 			}
 
 		}
 
-		for (Sig s : m.v1Sigs.values()) {
-			maxInt = Math.max(maxInt, sc1.sig2scope(s));
-		}
-		for (Sig s : m.v2Sigs.values()) {
-			maxInt = Math.max(maxInt, sc2.sig2scope(s));
-		}
-		// 30 is the largest bitwidth Alloy accepts
-		while (maxInt > Util.max(bitwidth) && bitwidth < 30) {
-			bitwidth++;
-		}
+		// (Previously the bitwidth was also increased until every signature scope
+		// of both versions could be represented, even if no scope bound needs it.
+		// This changed the integer semantics of both models, e.g., for "for 10".)
 
 		// The merged command explores traces with up to maxprefix steps. A temporal
 		// version with a smaller maximum is restricted to the traces it has in Alloy,
@@ -245,9 +262,10 @@ public class CommandGenerator {
 			}
 		}
 
-		Command cmd = new Command(edu.mit.csail.sdg.alloy4.Pos.UNKNOWN, getExpr(c1, c2, a), "", false, scope, bitwidth, maxseq, minprefix, maxprefix, -1, null, null, commandKeyword, getExpr(c1, c2, a), null);
-
-		boolean changed = false;
+		// scopes of the merged command; applied once the bitwidth is known
+		List<Sig> scopeSigs = new ArrayList<>();
+		List<Boolean> scopeExact = new ArrayList<>();
+		List<Integer> scopeValue = new ArrayList<>();
 		// update scope based on both modules
 		for (String sName : m.sigs.keySet()) {
 			Sig s = m.sigs.get(sName);
@@ -284,41 +302,45 @@ public class CommandGenerator {
 				// exact in the merged command only if both versions have the same exact
 				// scope; otherwise, e.g., "exactly 3" vs "exactly 2", the version with
 				// the smaller scope could not be represented (its "#s = 2" is in c1/c2)
-				cmd = cmd.change(s, exact1 && exact2 && scope1 == scope2 && !hasSubSigs1 && !hasSubSigs2, Math.max(scope1, scope2));
+				scopeSigs.add(s);
+				scopeExact.add(exact1 && exact2 && scope1 == scope2 && !hasSubSigs1 && !hasSubSigs2);
+				scopeValue.add(Math.max(scope1, scope2));
 			}
 			// explicitly embed cardinality constraints to respect model scopes
 			if (s1 != null && scope1 != -1 && !hasSubSigs1) {
 				if (exact1) {
-					Expr sc = s.cardinality().equal(ExprConstant.makeNUMBER(scope1));
+					Expr sc = cardBound(List.of(s), scope1, true);
 					m.trackConstraint(m.c1Constraints, sc, scopePos(cmd1, s1), ConstraintOrigin.SCOPE_BOUND);
 					c1 = c1.and(sc);
-					changed = true;
 				} else if (scope2 != -1 && scope1 < scope2) {
-					Expr sc = atMost(s, scope1, s.isVariable != null);
+					Expr sc = s.isVariable != null ? atMost(s, scope1, true) : cardBound(List.of(s), scope1, false);
 					m.trackConstraint(m.c1Constraints, sc, scopePos(cmd1, s1), ConstraintOrigin.SCOPE_BOUND);
 					c1 = c1.and(sc);
-					changed = true;
 				}
 			}
 			if (s2 != null && scope2 != -1 && !hasSubSigs2) {
 				if (exact2) {
-					Expr sc = s.cardinality().equal(ExprConstant.makeNUMBER(scope2));
+					Expr sc = cardBound(List.of(s), scope2, true);
 					m.trackConstraint(m.c2Constraints, sc, scopePos(cmd2, s2), ConstraintOrigin.SCOPE_BOUND);
 					c2 = c2.and(sc);
-					changed = true;
 				} else if (scope1 != -1 && scope2 < scope1) {
-					Expr sc = atMost(s, scope2, s.isVariable != null);
+					Expr sc = s.isVariable != null ? atMost(s, scope2, true) : cardBound(List.of(s), scope2, false);
 					m.trackConstraint(m.c2Constraints, sc, scopePos(cmd2, s2), ConstraintOrigin.SCOPE_BOUND);
 					c2 = c2.and(sc);
-					changed = true;
 				}
 			}
 		}
 
-		if (changed) {
-			cmd = cmd.change(getExpr(c1, c2, a));
+		// The bitwidth of the original commands is only increased if a bound k of
+		// the scope bounds cannot be represented, or if the guarded form of a bound
+		// needs it (see cardBound(..)). 30 is the largest bitwidth Alloy accepts.
+		while ((needSigned > Util.max(bitwidth) || needUnsigned > 2 * Util.max(bitwidth) + 1) && bitwidth < 30) {
+			bitwidth++;
 		}
-
+		Command cmd = new Command(edu.mit.csail.sdg.alloy4.Pos.UNKNOWN, getExpr(c1, c2, a), "", false, scope, bitwidth, maxseq, minprefix, maxprefix, -1, null, null, commandKeyword, getExpr(c1, c2, a), null);
+		for (int i = 0; i < scopeSigs.size(); i++) {
+			cmd = cmd.change(scopeSigs.get(i), scopeExact.get(i), scopeValue.get(i));
+		}
 		return cmd;
 	}
 	/**
@@ -389,6 +411,65 @@ public class CommandGenerator {
 			body = ExprUnary.Op.EVENTUALLY.make(null, ExprQt.Op.SOME.make(null, null, List.of(decls.get(i)), body));
 		}
 		return body.not();
+	}
+
+	/** largest number of atoms of a merged signature (by label) in T(v1, v2) */
+	private java.util.function.ToIntFunction<String> mergedScope;
+	/** bitwidth of the original commands */
+	private int bitwidth0;
+	/** largest k of a scope bound: must be at most the largest integer */
+	private int needSigned;
+	/** largest value a guarded partial sum may reach: must be below 2^bitwidth */
+	private int needUnsigned;
+
+	/**
+	 * The scope bound "#(s1 + ... + sn) <= k" (or "= k" if exact) for static,
+	 * pairwise disjoint merged signatures s1, ..., sn of one version.
+	 * <p>
+	 * The cardinality of the union can be larger than the largest integer of the
+	 * bitwidth, e.g., three signatures with scope 3 at bitwidth 4 (largest integer
+	 * 7). Integers wrap around, so 8 atoms would count as -8 and satisfy the
+	 * bound. (Previously this happened, and the bound did not restrict the
+	 * version to its scope.) If the sum of the merged scopes of s1, ..., sn fits
+	 * into the bitwidth of the original commands, the plain bound is used.
+	 * Otherwise every partial union is guarded:
+	 *
+	 * <pre>
+	 * 0 <= #(s1) <= k and 0 <= #(s1 + s2) <= k and ... and 0 <= #(s1 + ... + sn) <= k
+	 * </pre>
+	 *
+	 * If the previous guard holds, the true value of the next partial sum is at
+	 * most k plus the scope of the added signature. If this is below 2^bitwidth,
+	 * an overflow wraps to a negative value and violates the guard. The bitwidth
+	 * is increased only if this condition or k itself requires it.
+	 */
+	private Expr cardBound(List<Sig> comps, int k, boolean exact) {
+		Expr union = null;
+		int total = 0;
+		for (Sig c : comps) {
+			union = (union == null) ? c : union.plus(c);
+			total += mergedScope.applyAsInt(c.label);
+		}
+		needSigned = Math.max(needSigned, k);
+		Expr kk = ExprConstant.makeNUMBER(k);
+		if (total <= Util.max(bitwidth0)) {
+			return exact ? union.cardinality().equal(kk) : union.cardinality().lte(kk);
+		}
+		Expr res = null;
+		Expr prefix = null;
+		for (int i = 0; i < comps.size(); i++) {
+			Sig c = comps.get(i);
+			prefix = (prefix == null) ? c : prefix.plus(c);
+			int t = mergedScope.applyAsInt(c.label);
+			needUnsigned = Math.max(needUnsigned, i == 0 ? t : k + t);
+			Expr card = prefix.cardinality();
+			Expr g = card.gte(ExprConstant.makeNUMBER(0)).and(card.lte(kk));
+			res = (res == null) ? g : res.and(g);
+		}
+		if (exact) {
+			res = res.and(union.cardinality().equal(kk));
+		}
+		return res;
 	}
 
 	/**
