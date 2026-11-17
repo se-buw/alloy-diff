@@ -145,7 +145,7 @@ public class Compare {
 		DiffExplanation.Explanation explanation = DiffExplanation.explain(ans, merger, lastAnalysis);
 		lastExplanation = explanation;
 
-		if (lastAnalysis == Analysis.SemDiff) {
+		if (lastAnalysis == Analysis.SemDiff) {		// For semdiff, the witness satisfies c2 but violates c1 (rightFile/Current)
 			logViolatedConstraints(log, explanation.violatedC1(),
 					"Instance #" + instanceIndex + " — violated constraints (why this instance is rejected):");
 		} else {

@@ -1,4 +1,7 @@
 alloy-diff/
+*.prefs
+*.project
+*.classpath
 analysis/
 .DS_Store
 .gradle/
